@@ -1,0 +1,13 @@
+# Reference capability package for the Carpenter Phase A framework
+# (D8 cut B).  See ../../README.md.
+name: hello
+version: "0.1.0"
+description: |
+  Reference capability package — exercises the Phase A framework with
+  one read-only chat tool.  Not a real capability; safe to leave
+  installed but provides no useful functionality.
+chat_tools:
+  - tools.py
+kb_namespace: hello
+platform_compatibility:
+  - any
