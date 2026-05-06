@@ -30,6 +30,31 @@ read pipeline shape is::
 Each read template owns its own extract kind so a buggy or malicious
 REVIEWER cannot upcast a "meeting invite" payload into the shape of
 an "order confirmation" (which has different JUDGE-handler checks).
+
+Header-derived string fields (provenance warning)
+-------------------------------------------------
+
+Several fields below — ``subject``, ``from_address`` (display name
+component if present), ``location``, ``vendor``, ``order_id``,
+``items``, and similar — are copied verbatim from the inbound
+message's headers / body and may contain hostile content (prompt
+injection, control characters, hidden Unicode, social-engineering
+payloads).  The JUDGE handler bounds their length and bans control
+chars, but it does NOT semantically sanitise them.
+
+The trust contract is:
+
+* These strings ARE displayed to a human (the user reads with
+  appropriate skepticism — see ``kb/trust-warning.md``).
+* They MUST NEVER be re-fed into LLM context outside of the explicit
+  display path — e.g. don't take ``extract.subject`` and stuff it
+  into a follow-up agent goal, system prompt, or KB article.  Doing
+  so would re-open the prompt-injection path the templated
+  REVIEWER + JUDGE pipeline closes.
+
+If a future tool needs to act on these fields, route the action
+through a fresh PLANNER/REVIEWER pair with its own JUDGE — never let
+header-derived strings short-circuit into another agent's context.
 """
 
 from __future__ import annotations

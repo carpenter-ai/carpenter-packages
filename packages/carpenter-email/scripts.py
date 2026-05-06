@@ -157,6 +157,7 @@ GMAIL_SEARCH_SCRIPT = '''\
 from carpenter_tools.declarations import Label
 import os
 import json
+from urllib.parse import quote_plus
 
 q_result = dispatch(Label("state.get"), {"key": Label("search_query")})
 q = q_result[Label("value")]
@@ -171,10 +172,13 @@ access_token = os.environ.get("GMAIL_OAUTH_ACCESS_TOKEN", "")
 if not access_token:
     raise RuntimeError("GMAIL_OAUTH_ACCESS_TOKEN not in environment")
 
+# Use full URL-encoding (quote_plus): a Gmail search query may contain
+# &, #, ?, and other reserved characters that ``str.replace(" ", "+")``
+# would not escape, breaking the request URL.
 url = (
     "https://gmail.googleapis.com/gmail/v1/users/me/messages"
     + "?maxResults=" + str(max_results)
-    + "&q=" + q.replace(" ", "+")
+    + "&q=" + quote_plus(q)
 )
 result = dispatch(Label("web.get"), {
     "url": url,
