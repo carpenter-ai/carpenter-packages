@@ -1,0 +1,94 @@
+name: carpenter-email
+version: "0.1.0"
+description: |
+  Email assistant package (Gmail API backend).  Phase 1: read inbox
+  messages through the D24 untrusted-data pipeline and send mail with
+  expected-account safety check.  Read-side ships three review
+  templates (simple text, meeting invite, order confirmation), each
+  with a REVIEWER + JUDGE pipeline that gates body content behind
+  deterministic policy checks before it can reach trusted context.
+
+chat_tools:
+  - tools.py
+
+kb_namespace: email
+
+platform_compatibility:
+  - any
+
+# Trust-graduating dataclasses (D24 SD11).  Each read template emits
+# its own kind so a malicious REVIEWER cannot upcast a
+# meeting-invite extract into an order-confirmation extract.
+data_models:
+  - EmailReviewBriefing
+  - EmailSimpleTextExtract
+  - EmailMeetingInviteExtract
+  - EmailOrderConfirmationExtract
+
+# Three Phase 1 read templates, one per email kind.  Each has the
+# canonical PLANNER -> EXECUTOR (untrusted Gmail fetch) -> REVIEWER
+# (constrained, static prompt) -> JUDGE (deterministic) shape.
+arc_templates:
+  - name: email_read_simple_text
+    path: templates/email-read-simple-text/template.yaml
+    briefing_kind: EmailReviewBriefing
+    extract_kind: EmailSimpleTextExtract
+    judge_handler: judges:judge_simple_text
+  - name: email_read_meeting_invite
+    path: templates/email-read-meeting-invite/template.yaml
+    briefing_kind: EmailReviewBriefing
+    extract_kind: EmailMeetingInviteExtract
+    judge_handler: judges:judge_meeting_invite
+  - name: email_read_order_confirmation
+    path: templates/email-read-order-confirmation/template.yaml
+    briefing_kind: EmailReviewBriefing
+    extract_kind: EmailOrderConfirmationExtract
+    judge_handler: judges:judge_order_confirmation
+
+judge_handlers:
+  - name: judge_simple_text
+    module: judges
+  - name: judge_meeting_invite
+    module: judges
+  - name: judge_order_confirmation
+    module: judges
+
+# KB articles seeded into kb/email/* on install.
+kb_articles:
+  - slug: email/overview
+    path: kb/overview.md
+  - slug: email/policy-setup
+    path: kb/policy-setup.md
+  - slug: email/trust-warning
+    path: kb/trust-warning.md
+  - slug: email/style
+    path: kb/style.md
+
+# Phase 1 ships ZERO sender allowlist proposals.  The user populates
+# the email allowlist via pkg_email_trust_sender (chat tool), one
+# entry at a time, with the standard human-confirm flow.  This keeps
+# the accumulation-attack threat (T9) from biting.
+#
+# Phase 1 DOES propose two domain entries (Gmail API endpoints) so
+# the EXECUTOR can reach Google.
+allowlist_proposals:
+  - type: domain
+    value: gmail.googleapis.com
+  - type: domain
+    value: oauth2.googleapis.com
+
+# Gmail OAuth credential requirement.  Phase 1 needs gmail.readonly
+# (for list/search/read) and gmail.send (for send_email).  The
+# platform's generic OAuth-callback flow (carpenter/api/oauth.py)
+# handles the redirect-and-exchange round-trip and writes tokens
+# to the platform .env under the GMAIL_OAUTH_ prefix.
+credential_requirements:
+  - kind: oauth
+    provider: google
+    env_key_prefix: GMAIL_OAUTH
+    authorize_url: https://accounts.google.com/o/oauth2/v2/auth
+    token_url: https://oauth2.googleapis.com/token
+    scopes:
+      - https://www.googleapis.com/auth/gmail.readonly
+      - https://www.googleapis.com/auth/gmail.send
+      - https://www.googleapis.com/auth/userinfo.email
