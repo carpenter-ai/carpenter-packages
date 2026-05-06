@@ -26,12 +26,23 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-# Note: we deliberately do NOT import the extract dataclasses here.
-# The JUDGE-dispatch wrapper hands us already-deserialised dataclasses
-# whose class identity may not match a fresh import in this module's
-# namespace (the package loader uses ``_import_package_module`` which
-# can result in two sys.modules entries for ``data_models`` across
-# different load paths).  We do duck-typed class-name checks instead.
+from .data_models import (
+    EmailMeetingInviteExtract,
+    EmailOrderConfirmationExtract,
+    EmailSimpleTextExtract,
+)
+
+# We import the extract dataclasses via the package-relative path so
+# this module and ``data_models`` are loaded under the SAME namespaced
+# slot in ``sys.modules`` (``_carpenter_pkg_.carpenter-email.data_models``).
+# The platform's ``_import_package_module`` loader (which is what loads
+# both this file and ``data_models``) ensures these class objects are
+# identical to the ones the JUDGE-dispatch wrapper passes us, so
+# ``isinstance`` is the correct, strongest check available.  Test code
+# that wants ``isinstance``-compatible class identity must also go
+# through ``_import_package_module`` (or its dependents like
+# ``load_data_models`` / ``lookup_kind``) rather than constructing
+# raw ``importlib.util.spec_from_file_location`` modules.
 
 
 # ---------------------------------------------------------------------------
@@ -179,14 +190,11 @@ def judge_simple_text(extract: Any) -> JudgeVerdict:
     to_addresses, cc_addresses, extracted_urls) are already
     validated by the dispatch wrapper before this runs.
     """
-    # Use class-name match instead of ``isinstance`` because the data
-    # model class can be loaded under multiple module-identity slots
-    # (test runner, package loader, relative import) and isinstance
-    # would spuriously reject across those slots.  The JUDGE-dispatch
-    # wrapper already guarantees the dataclass shape matches the
-    # template's ``extract_kind`` declaration, so this check is a
-    # belt-and-braces type assertion, not the load-bearing gate.
-    if type(extract).__name__ != "EmailSimpleTextExtract":
+    # The JUDGE-dispatch wrapper already guarantees the dataclass
+    # shape matches the template's ``extract_kind`` declaration, so
+    # this check is a belt-and-braces type assertion, not the
+    # load-bearing gate.
+    if not isinstance(extract, EmailSimpleTextExtract):
         return JudgeVerdict.reject(
             f"expected EmailSimpleTextExtract, got {type(extract).__name__}",
         )
@@ -213,7 +221,7 @@ def judge_meeting_invite(extract: Any) -> JudgeVerdict:
     are ISO-8601-ish, location is bounded and control-free, organizer
     is a valid policy email (already checked by dispatch wrapper).
     """
-    if type(extract).__name__ != "EmailMeetingInviteExtract":
+    if not isinstance(extract, EmailMeetingInviteExtract):
         return JudgeVerdict.reject(
             f"expected EmailMeetingInviteExtract, got "
             f"{type(extract).__name__}",
@@ -251,7 +259,7 @@ def judge_order_confirmation(extract: Any) -> JudgeVerdict:
     and free of control chars; the items list is capped at
     ``_MAX_ITEMS``.
     """
-    if type(extract).__name__ != "EmailOrderConfirmationExtract":
+    if not isinstance(extract, EmailOrderConfirmationExtract):
         return JudgeVerdict.reject(
             f"expected EmailOrderConfirmationExtract, got "
             f"{type(extract).__name__}",

@@ -395,8 +395,10 @@ def _resolve_expected_account() -> str:
     """Return the mailbox email Carpenter expects to be acting on.
 
     Uses the userinfo cached from the OAuth flow if present; otherwise
-    falls back to the platform's configured operator email.  Empty
-    string is fine — JUDGE will then accept any allowlisted mailbox.
+    falls back to the platform's configured operator email.  Returns
+    empty string if neither is set; callers MUST treat empty as a
+    fail-closed condition (T1 envelope check is unenforceable without
+    an expected account).
     """
     from carpenter import config
 
@@ -405,6 +407,15 @@ def _resolve_expected_account() -> str:
         or config.CONFIG.get("operator_email")
         or ""
     ).strip().lower()
+
+
+_EXPECTED_ACCOUNT_NOT_CONFIGURED_ERROR = (
+    "expected_account is not configured (neither GMAIL_OAUTH_ACCOUNT_EMAIL "
+    "nor operator_email is set).  Run pkg_email_authorize first to "
+    "complete the Gmail OAuth flow — without this, the T1 envelope "
+    "recipient-mismatch check cannot be enforced and read paths fail "
+    "closed."
+)
 
 
 def _create_search_executor(
@@ -555,6 +566,8 @@ def pkg_email_search_emails(tool_input, **kwargs):
         return json.dumps({"error": "query is required"})
     if max_results < 1 or max_results > 25:
         return json.dumps({"error": "max_results must be between 1 and 25"})
+    if not _resolve_expected_account():
+        return json.dumps({"error": _EXPECTED_ACCOUNT_NOT_CONFIGURED_ERROR})
 
     conversation_id = kwargs.get("conversation_id")
     result = _create_search_executor(
@@ -646,6 +659,8 @@ def pkg_email_read_email(tool_input, **kwargs):
     if not template_name:
         return json.dumps({"error": f"unknown kind {kind!r}"})
     expected = _resolve_expected_account()
+    if not expected:
+        return json.dumps({"error": _EXPECTED_ACCOUNT_NOT_CONFIGURED_ERROR})
     conversation_id = kwargs.get("conversation_id")
     result = _create_read_arc_tree(
         template_name=template_name,
