@@ -1,0 +1,50 @@
+name: email_read_simple_text
+description: |
+  Read one Gmail message and emit a sanitised plain-text extract.
+  PLANNER prepares an EmailReviewBriefing; EXECUTOR fetches the
+  message JSON via the Gmail API; REVIEWER produces an
+  EmailSimpleTextExtract with body summary, extracted URLs, and
+  flags; the package JUDGE runs deterministic structural checks
+  before the extract Resource graduates to trusted.
+steps:
+  - name: prepare-briefing
+    description: |
+      Construct EmailReviewBriefing from the global SecurityPolicies.email
+      allowlist snapshot and the static suspicious-keyword list, then
+      derive_resource it as born-trusted.  Trusted PLANNER context.
+    order: 0
+    agent_type: PLANNER
+    model_policy: fast-chat
+  - name: fetch-gmail
+    description: |
+      Untrusted EXECUTOR step.  Submits a pre-verified script that
+      reads ``provider_message_id`` and the OAuth credentials from
+      arc state, calls users.messages.get on the Gmail API, and writes
+      the response JSON to the raw_email Resource on disk.  No
+      KB access; egress restricted to gmail.googleapis.com /
+      oauth2.googleapis.com via the platform domain allowlist.
+    order: 1
+    agent_type: EXECUTOR
+    integrity_level: untrusted
+    model_policy: background-batch
+  - name: review-extract
+    description: |
+      Constrained REVIEWER step with a static prompt shipped from
+      the package.  Reads briefing + raw email JSON; writes one
+      pending EmailSimpleTextExtract Resource via derive_resource.
+      No KB access (defence-in-depth against prompt injection).
+    order: 2
+    agent_type: REVIEWER
+    model_policy: careful-coding
+    arc_role: verifier
+  - name: judge-extract
+    description: |
+      Deterministic JUDGE step — handled by the platform's
+      ``_try_package_judge`` dispatch, which loads the extract
+      Resource bytes, deserialises into EmailSimpleTextExtract,
+      validates every PolicyLiteral field against SecurityPolicies,
+      and calls ``judges:judge_simple_text``.  On approve the
+      Resource's template_verdict flips to 'approved' and the parent
+      can read it.  No AI agent.
+    order: 3
+    agent_type: JUDGE
