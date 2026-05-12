@@ -4,6 +4,10 @@ D24 capability package: Gmail read + send for the chat agent, with
 the full PLANNER -> EXECUTOR -> REVIEWER -> JUDGE pipeline gating
 every U->T (untrusted-to-trusted) graduation.
 
+**If you just want to use the package**, read [`SETUP.md`](SETUP.md)
+— it walks an end user from Google Cloud setup through first send.
+This README is package-developer / package-author oriented.
+
 ## Layout
 
 ```
