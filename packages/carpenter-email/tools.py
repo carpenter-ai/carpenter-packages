@@ -1,21 +1,30 @@
 """Chat tools for the carpenter-email package.
 
 These are the chat-boundary tools the chat agent calls.  Each is a
-``@chat_tool``-decorated function.  Read-side tools fan out arc
-batches into the package's PLANNER -> EXECUTOR -> REVIEWER -> JUDGE
-pipelines; send-side ships ``pkg_email_send_email`` which creates a
-single-arc untrusted EXECUTOR pipeline guarded by a chat-boundary
-human-confirm and an in-script expected-account check.
+``@chat_tool``-decorated function.  Read-side and write-side tools
+both fan out arc batches into the package's PLANNER -> EXECUTOR ->
+REVIEWER -> JUDGE pipeline so every U->T graduation passes through a
+deterministic JUDGE handler.
 
 Design notes (see ``docs/2026-05-06_carpenter-email-build-plan.md``
-in carpenter-core):
+in carpenter-core and the Phase 1.5 v2 plan at
+``notes/phase-1.5-plan-v2.md``):
 
 * The chat agent never sees raw email bodies.  All read paths route
   through a templated REVIEWER + deterministic JUDGE that graduates
   a structured extract Resource to trusted state.
-* ``pkg_email_send_email`` requires user confirmation at the chat
-  boundary AND validates each ``to`` address against the global
-  ``SecurityPolicies.email`` allowlist before submitting the EXECUTOR.
+* The four external-effect tools (``pkg_email_send_email``,
+  ``pkg_email_archive_email``, ``pkg_email_mark_read_email``,
+  ``pkg_email_draft_email``) each require user confirmation at the
+  chat boundary AND go through the same four-arc tree as reads.  The
+  EXECUTOR's pre-verified script writes a small structured JSON
+  receipt; the REVIEWER + JUDGE graduate a typed EmailXxxResult
+  dataclass so the chat agent can phrase the outcome without ever
+  consuming Gmail's response body directly.
+* ``pkg_email_send_email`` and ``pkg_email_draft_email`` additionally
+  validate each ``to`` address against the global
+  ``SecurityPolicies.email`` allowlist at the chat boundary BEFORE
+  the arc is built.
 * Allowlist mutation (``pkg_email_trust_sender`` /
   ``pkg_email_untrust_sender``) goes through the platform's
   ``policy_store`` write path with ``requires_user_confirm=True`` so
@@ -728,22 +737,21 @@ def _build_raw_message(
     requires_user_confirm=True,
 )
 def pkg_email_send_email(tool_input, **kwargs):
-    """Send an email through the Gmail API via an EXECUTOR arc.
+    """Send an email through the Gmail API via the write-side arc tree.
 
-    Arc shape: a single PLANNER -> EXECUTOR (untrusted, output_type='json').
-    The PLANNER pre-validates recipients against SecurityPolicies.email;
-    the EXECUTOR's pre-verified script (``GMAIL_SEND_SCRIPT``) checks
-    that the OAuth token's account email matches expected_account_email
-    before posting.
+    Arc shape: PLANNER -> EXECUTOR (untrusted) -> REVIEWER ->
+    JUDGE, identical to the read tools.  The EXECUTOR's pre-verified
+    script (``GMAIL_SEND_SCRIPT``) checks that the OAuth token's
+    account email matches expected_account_email before posting and
+    writes a structured JSON receipt for the REVIEWER + JUDGE to
+    graduate as an EmailSendResult.
 
-    The chat-boundary ``requires_user_confirm=True`` guarantees the
-    user sees and approves every send before the EXECUTOR is dispatched.
+    Recipients are validated against ``SecurityPolicies.email`` at the
+    chat boundary BEFORE the arc is constructed; the chat-boundary
+    ``requires_user_confirm=True`` guarantees the user sees and
+    approves every send.
     """
-    from carpenter.core.arcs import manager as _am
-    from carpenter.core.engine import work_queue as _wq
-    from carpenter.core.workflows._arc_state import set_arc_state
     from carpenter.security import get_policies
-    from carpenter.tool_backends import arc as arc_backend
 
     from .scripts import GMAIL_SEND_SCRIPT
 
@@ -785,70 +793,32 @@ def pkg_email_send_email(tool_input, **kwargs):
         sender=expected, to=to_list, subject=subject, body=body,
     )
 
-    # Single-arc EXECUTOR pipeline.  No REVIEWER+JUDGE because this is
-    # an outbound effect, not a U->T promotion.  The expected-account
-    # check inside the script is the trust gate.
-    parent_id = _am.create_arc(
-        name=f"Email send: {subject[:60]}",
-        goal=(
+    result = _create_write_arc_tree(
+        template_name="email_write_send",
+        arc_name=f"Email send: {subject[:60]}",
+        arc_goal=(
             "Send an email via the Gmail API using the pre-verified "
-            "send script.  Recipients have been validated against "
+            "send script, then graduate a typed EmailSendResult "
+            "receipt to trusted state via the constrained REVIEWER + "
+            "deterministic JUDGE.  Recipients were validated against "
             "SecurityPolicies.email at the chat boundary; the "
             "in-script expected-account check guards against a "
             "swapped-in refresh-token attack."
         ),
-        agent_type="PLANNER",
+        script=GMAIL_SEND_SCRIPT,
+        state_seed={"raw_message_b64": raw_b64},
+        expected_account_email=expected,
+        staged_to_addresses=tuple(to_list),
+        conversation_id=kwargs.get("conversation_id"),
     )
-    conversation_id = kwargs.get("conversation_id")
-    if conversation_id:
-        from carpenter.agent import conversation as _conv
-        _conv.link_arc_to_conversation(conversation_id, parent_id)
-    _am.update_status(parent_id, "active")
-
-    batch_result = arc_backend.handle_create_batch({
-        "arcs": [
-            {
-                "name": "Send Gmail message",
-                "goal": (
-                    "Submit this EXACT code via submit_code:\n"
-                    "```python\n" + GMAIL_SEND_SCRIPT + "```\n"
-                    "Inputs (raw_message_b64, expected_account_email) "
-                    "are pre-seeded in arc state."
-                ),
-                "parent_id": parent_id,
-                "integrity_level": "untrusted",
-                "output_type": "json",
-                "agent_type": "EXECUTOR",
-                "step_order": 0,
-            },
-        ],
-    })
-    if "error" in batch_result:
-        try:
-            _am.update_status(parent_id, "failed")
-        except Exception:  # noqa: BLE001
-            pass
-        return json.dumps({"error": batch_result["error"]})
-
-    executor_arc_id = batch_result["arc_ids"][0]
-    set_arc_state(executor_arc_id, "raw_message_b64", raw_b64)
-    set_arc_state(executor_arc_id, "expected_account_email", expected)
-    set_arc_state(parent_id, "expected_account_email", expected)
-
-    if conversation_id:
-        from carpenter.agent import conversation as _conv
-        _conv.link_arc_to_conversation(conversation_id, executor_arc_id)
-
-    _wq.enqueue(
-        "arc.dispatch",
-        {"arc_id": executor_arc_id},
-        idempotency_key=f"arc_dispatch:{executor_arc_id}",
-    )
+    if "error" in result:
+        return json.dumps(result)
     return json.dumps({
-        "arc_id": parent_id,
+        "arc_id": result["arc_id"],
         "note": (
-            f"Send queued (arc #{parent_id}).  Result will arrive via "
-            "arc-completion notify."
+            f"Send queued (arc #{result['arc_id']}).  Result will "
+            "arrive via arc-completion notify when the JUDGE "
+            "approves the EmailSendResult receipt."
         ),
     })
 
@@ -939,60 +909,89 @@ def pkg_email_untrust_sender(tool_input, **kwargs):
 
 
 # ---------------------------------------------------------------------------
-# Phase 1.5: external-effect modify tools (archive / mark-read / draft)
+# Write-side helper: PLANNER -> EXECUTOR -> REVIEWER -> JUDGE pipeline
 #
-# All three tools share the same trust shape as ``pkg_email_send_email``:
-# a single-arc untrusted EXECUTOR pipeline guarded by
-# ``requires_user_confirm=True`` at the chat boundary plus an in-script
-# expected-account check.  They are deliberately NOT U->T graduations
-# (no REVIEWER + JUDGE), because no untrusted data is being promoted to
-# trusted context — the side-effect on Gmail IS the operation.
+# All four external-effect tools (send + archive + mark-read + draft)
+# share the same arc-tree shape as the read tools.  Each EXECUTOR script
+# writes a small structured JSON receipt to a raw Resource; the REVIEWER
+# derives a typed EmailXxxResult dataclass into a pending extract
+# Resource; the package JUDGE validates and graduates.  Trust invariant
+# I3 (U->T only via JUDGE) is preserved by construction.
 # ---------------------------------------------------------------------------
 
 
-def _create_modify_arc(
+# Map each write template to its extract dataclass kind.  Used to
+# pre-create the pending extract Resource the REVIEWER derives into.
+_WRITE_EXTRACT_KIND_BY_TEMPLATE = {
+    "email_write_send": "EmailSendResult",
+    "email_write_archive": "EmailArchiveResult",
+    "email_write_mark_read": "EmailMarkReadResult",
+    "email_write_draft": "EmailDraftResult",
+}
+
+
+def _create_write_arc_tree(
     *,
-    template_label: str,
+    template_name: str,
     arc_name: str,
     arc_goal: str,
     script: str,
     state_seed: dict,
     expected_account_email: str,
+    staged_to_addresses: tuple[str, ...],
     conversation_id: int | None,
 ) -> dict:
-    """Construct a single-arc untrusted EXECUTOR pipeline for a Gmail
-    modify-style operation (archive / mark-read / draft-create).
+    """Spin up the PLANNER -> EXECUTOR -> REVIEWER -> JUDGE arc tree
+    for one Gmail external-effect operation.
 
-    Mirrors ``pkg_email_send_email``'s arc construction exactly.  The
-    caller is responsible for chat-boundary recipient-allowlist checks
-    where applicable (draft); archive and mark-read have no recipient
-    surface.
+    Returns ``{"arc_id": <parent_planner_id>}`` on success or
+    ``{"error": ...}`` on failure.
+
+    Mirrors ``_create_read_arc_tree``'s shape: the EXECUTOR writes a
+    raw JSON receipt to a raw Resource (untrusted, produced_by_template
+    is NULL); the REVIEWER reads briefing + raw receipt and derives a
+    pending typed extract Resource (template_verdict='pending',
+    produced_by_template=<template_name>); the JUDGE flips the verdict
+    deterministically via the platform's ``_try_package_judge`` path.
 
     Args:
-        template_label: Short label used in arc-history breadcrumbs
-            (e.g. ``"archive"``, ``"mark_read"``, ``"draft"``).
+        template_name: One of ``email_write_send`` /
+            ``email_write_archive`` / ``email_write_mark_read`` /
+            ``email_write_draft``.  Determines the extract kind and
+            the JUDGE handler dispatched by the platform.
         arc_name: Human-readable parent arc name (shown in UIs).
         arc_goal: Parent arc goal.
         script: Pre-verified EXECUTOR script body (from scripts.py).
         state_seed: dict of arc-state keys to set on the EXECUTOR
             before dispatch.  Must include all inputs the script
-            reads via ``dispatch(Label("state.get"), ...)``.
+            reads via ``dispatch(Label("state.get"), ...)`` other
+            than the raw-Resource wiring this helper sets itself
+            (``raw_resource_path`` and ``raw_resource_id``).
         expected_account_email: mailbox the OAuth token is expected
             to belong to.  Stored on the parent arc for audit and
-            re-pushed onto the EXECUTOR's state_seed if not already
-            present.
+            on the EXECUTOR for the in-script check.
+        staged_to_addresses: recipient set the chat boundary approved
+            (empty tuple for archive / mark-read which have no
+            recipient surface).  Recorded on the parent arc for the
+            briefing builder.
         conversation_id: chat conversation that initiated the call
             (or None for unsolicited).
-
-    Returns ``{"arc_id": <parent_id>}`` on success or
-    ``{"error": ...}`` on failure (parent arc is marked failed so the
-    audit trail still surfaces the attempt).
     """
     from carpenter.core.arcs import manager as _am
     from carpenter.core.engine import work_queue as _wq
+    from carpenter.core.resources import (
+        create_resource as _create_resource,
+        derive_resource as _derive_resource,
+        link_arc_resource as _link_arc_resource,
+        resource_storage_path as _resource_storage_path,
+    )
     from carpenter.core.workflows._arc_state import set_arc_state
+    from carpenter.db import db_transaction as _db_transaction
     from carpenter.tool_backends import arc as arc_backend
 
+    extract_kind = _WRITE_EXTRACT_KIND_BY_TEMPLATE[template_name]
+
+    # 1) Parent PLANNER
     parent_id = _am.create_arc(
         name=arc_name,
         goal=arc_goal,
@@ -1003,14 +1002,18 @@ def _create_modify_arc(
         _conv.link_arc_to_conversation(conversation_id, parent_id)
     _am.update_status(parent_id, "active")
 
+    # 2) Children: EXECUTOR (untrusted) + REVIEWER (constrained) + JUDGE
     batch_result = arc_backend.handle_create_batch({
         "arcs": [
             {
-                "name": f"Gmail {template_label}",
+                "name": f"Gmail {template_name}",
                 "goal": (
-                    "Submit this EXACT code via submit_code:\n"
-                    "```python\n" + script + "```\n"
-                    "Inputs are pre-seeded in arc state."
+                    "Submit this EXACT code via submit_code (do not "
+                    "modify it):\n```python\n"
+                    + script
+                    + "```\nAll inputs (operation payload, "
+                    "expected_account_email, raw_resource_path, "
+                    "raw_resource_id) have been pre-seeded in arc state."
                 ),
                 "parent_id": parent_id,
                 "integrity_level": "untrusted",
@@ -1018,8 +1021,48 @@ def _create_modify_arc(
                 "agent_type": "EXECUTOR",
                 "step_order": 0,
             },
+            {
+                "name": "Review write receipt and emit extract",
+                "goal": (
+                    "Read the briefing Resource and the raw_receipt "
+                    "Resource (paths in arc state under "
+                    "'briefing_resource_id' and 'raw_resource_path'). "
+                    "Follow the static REVIEWER prompt shipped with "
+                    "this template.  Emit exactly one extract "
+                    "dataclass via derive_resource using the kind "
+                    "named in arc state under 'extract_kind'.  Then "
+                    "exit — the deterministic JUDGE will validate "
+                    "and graduate."
+                ),
+                "parent_id": parent_id,
+                "agent_type": "REVIEWER",
+                "integrity_level": "trusted",
+                "reviewer_profile": "security-reviewer",
+                "model_policy": "careful-coding",
+                "step_order": 1,
+            },
+            {
+                "name": "Judge write receipt",
+                "goal": (
+                    "JUDGE: validate the REVIEWER's extract Resource. "
+                    "Call resource.submit_verdict with the extract's "
+                    "resource_id (in arc state under "
+                    "'_review_target_resource_id') and "
+                    "verdict='approved' or 'rejected' based on the "
+                    "package's deterministic JUDGE handler "
+                    "(auto-dispatched by the platform via "
+                    "_try_package_judge — you do not write Python "
+                    "checks here)."
+                ),
+                "parent_id": parent_id,
+                "agent_type": "JUDGE",
+                "integrity_level": "trusted",
+                "reviewer_profile": "judge",
+                "step_order": 2,
+            },
         ],
     })
+
     if "error" in batch_result:
         try:
             _am.update_status(parent_id, "failed")
@@ -1027,19 +1070,117 @@ def _create_modify_arc(
             pass
         return {"error": batch_result["error"]}
 
-    executor_arc_id = batch_result["arc_ids"][0]
+    child_ids = batch_result["arc_ids"]
+    executor_arc_id, reviewer_arc_id, judge_arc_id = child_ids[:3]
 
-    # Pre-seed all caller-supplied state keys.  We always include
-    # expected_account_email so the in-script check is enforceable.
+    # 3) Raw receipt Resource (untrusted ingest; EXECUTOR writes JSON
+    #    to this path via files.write + resource.finalize).
+    raw_resource_id = _create_resource(
+        content_type="json",
+        file_path=None,
+        produced_by_arc_id=executor_arc_id,
+        source_descriptor=f"gmail-write:{template_name}",
+    )
+    raw_path = _resource_storage_path(raw_resource_id, "blob")
+    raw_path.parent.mkdir(parents=True, exist_ok=True)
+    with _db_transaction() as _db:
+        _db.execute(
+            "UPDATE resources SET file_path = ? WHERE id = ?",
+            (str(raw_path), raw_resource_id),
+        )
+    _link_arc_resource(
+        arc_id=executor_arc_id, resource_id=raw_resource_id, role="output",
+    )
+
+    # 4) Briefing Resource (PLANNER outputs; born-trusted by PLANNER)
+    briefing_resource_id = _derive_resource(
+        content_type="dataclass",
+        file_path=None,
+        produced_by_arc_id=parent_id,
+        produced_by_template=None,  # born trusted by trusted PLANNER
+        template_verdict="approved",
+        source_descriptor=f"briefing:{template_name}",
+    )
+    briefing_path = _resource_storage_path(briefing_resource_id, "blob")
+    briefing_path.parent.mkdir(parents=True, exist_ok=True)
+    with _db_transaction() as _db:
+        _db.execute(
+            "UPDATE resources SET file_path = ? WHERE id = ?",
+            (str(briefing_path), briefing_resource_id),
+        )
+
+    # 5) Extract Resource (REVIEWER -> JUDGE; pending until JUDGE approves)
+    extract_resource_id = _derive_resource(
+        content_type="dataclass",
+        file_path=None,
+        produced_by_arc_id=reviewer_arc_id,
+        produced_by_template=template_name,
+        template_verdict="pending",
+        source_descriptor=f"receipt:{template_name}",
+    )
+    extract_path = _resource_storage_path(extract_resource_id, "blob")
+    extract_path.parent.mkdir(parents=True, exist_ok=True)
+    with _db_transaction() as _db:
+        _db.execute(
+            "UPDATE resources SET file_path = ? WHERE id = ?",
+            (str(extract_path), extract_resource_id),
+        )
+
+    # 6) Arc-resource links
+    _link_arc_resource(
+        arc_id=reviewer_arc_id,
+        resource_id=briefing_resource_id,
+        role="input",
+    )
+    _link_arc_resource(
+        arc_id=reviewer_arc_id,
+        resource_id=raw_resource_id,
+        role="input",
+    )
+    _link_arc_resource(
+        arc_id=reviewer_arc_id,
+        resource_id=extract_resource_id,
+        role="output",
+    )
+
+    # 7) Pre-seed arc state on the EXECUTOR.  Caller-supplied keys
+    # (the script's operation payload) plus the raw-Resource wiring
+    # plus the expected-account check input.
     seed = dict(state_seed)
     seed.setdefault("expected_account_email", expected_account_email)
+    seed["raw_resource_path"] = str(raw_path)
+    seed["raw_resource_id"] = raw_resource_id
     for key, value in seed.items():
         set_arc_state(executor_arc_id, key, value)
+
+    # Parent arc state — for the briefing builder and audit.
     set_arc_state(parent_id, "expected_account_email", expected_account_email)
+    set_arc_state(parent_id, "briefing_resource_id", briefing_resource_id)
+    set_arc_state(parent_id, "_primary_resource_id", extract_resource_id)
+    set_arc_state(parent_id, "template_name", template_name)
+    set_arc_state(parent_id, "extract_kind", extract_kind)
+    set_arc_state(
+        parent_id, "staged_to_addresses", list(staged_to_addresses),
+    )
+
+    # REVIEWER arc state — what it reads and writes.
+    set_arc_state(reviewer_arc_id, "briefing_resource_id", briefing_resource_id)
+    set_arc_state(reviewer_arc_id, "raw_resource_path", str(raw_path))
+    set_arc_state(reviewer_arc_id, "raw_resource_id", raw_resource_id)
+    set_arc_state(reviewer_arc_id, "extract_resource_id", extract_resource_id)
+    set_arc_state(reviewer_arc_id, "extract_kind", extract_kind)
+    set_arc_state(reviewer_arc_id, "template_name", template_name)
+
+    # JUDGE arc state — what it grades.
+    set_arc_state(
+        judge_arc_id, "_review_target_resource_id", extract_resource_id,
+    )
+    set_arc_state(judge_arc_id, "extract_resource_id", extract_resource_id)
 
     if conversation_id:
         from carpenter.agent import conversation as _conv
-        _conv.link_arc_to_conversation(conversation_id, executor_arc_id)
+        for child_id in child_ids:
+            _conv.link_arc_to_conversation(conversation_id, child_id)
 
     _wq.enqueue(
         "arc.dispatch",
@@ -1090,18 +1231,21 @@ def pkg_email_archive_email(tool_input, **kwargs):
             ),
         })
 
-    result = _create_modify_arc(
-        template_label="archive",
+    result = _create_write_arc_tree(
+        template_name="email_write_archive",
         arc_name=f"Email archive: {mid[:32]}",
         arc_goal=(
             "Archive a Gmail message (remove INBOX label) using the "
             "pre-verified archive script.  The in-script "
             "expected-account check guards against a swapped-in "
-            "refresh-token attack."
+            "refresh-token attack.  REVIEWER extracts a typed "
+            "EmailArchiveResult from the Gmail response; JUDGE "
+            "graduates it from untrusted to trusted."
         ),
         script=GMAIL_ARCHIVE_SCRIPT,
         state_seed={"provider_message_id": mid},
         expected_account_email=expected,
+        staged_to_addresses=(),
         conversation_id=kwargs.get("conversation_id"),
     )
     if "error" in result:
@@ -1155,18 +1299,21 @@ def pkg_email_mark_read_email(tool_input, **kwargs):
             ),
         })
 
-    result = _create_modify_arc(
-        template_label="mark_read",
+    result = _create_write_arc_tree(
+        template_name="email_write_mark_read",
         arc_name=f"Email mark-read: {mid[:32]}",
         arc_goal=(
             "Mark a Gmail message as read (remove UNREAD label) using "
             "the pre-verified mark-read script.  The in-script "
             "expected-account check guards against a swapped-in "
-            "refresh-token attack."
+            "refresh-token attack.  REVIEWER extracts a typed "
+            "EmailMarkReadResult from the Gmail response; JUDGE "
+            "graduates it from untrusted to trusted."
         ),
         script=GMAIL_MARK_READ_SCRIPT,
         state_seed={"provider_message_id": mid},
         expected_account_email=expected,
+        staged_to_addresses=(),
         conversation_id=kwargs.get("conversation_id"),
     )
     if "error" in result:
@@ -1258,19 +1405,22 @@ def pkg_email_draft_email(tool_input, **kwargs):
         sender=expected, to=to_list, subject=subject, body=body,
     )
 
-    result = _create_modify_arc(
-        template_label="draft",
+    result = _create_write_arc_tree(
+        template_name="email_write_draft",
         arc_name=f"Email draft: {subject[:60]}",
         arc_goal=(
             "Create a Gmail draft using the pre-verified draft "
             "script.  Recipients have been validated against "
             "SecurityPolicies.email at the chat boundary; the "
             "in-script expected-account check guards against a "
-            "swapped-in refresh-token attack."
+            "swapped-in refresh-token attack.  REVIEWER extracts a "
+            "typed EmailDraftResult from the Gmail response; JUDGE "
+            "graduates it from untrusted to trusted."
         ),
         script=GMAIL_DRAFT_SCRIPT,
         state_seed={"raw_message_b64": raw_b64},
         expected_account_email=expected,
+        staged_to_addresses=tuple(to_list),
         conversation_id=kwargs.get("conversation_id"),
     )
     if "error" in result:

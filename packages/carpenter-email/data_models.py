@@ -1,4 +1,4 @@
-"""Data models for the carpenter-email Phase 1 review pipelines.
+"""Data models for the carpenter-email review pipelines.
 
 Every kind here is reserved at install time via the manifest's
 ``data_models:`` section and consumed by the JUDGE-dispatch
@@ -6,6 +6,18 @@ deserialiser.  The shapes are intentionally narrow: each field is
 either a primitive (str / int / bool) or a PolicyLiteral subclass
 that the JUDGE-dispatch wrapper validates against ``SecurityPolicies``
 *before* the package's JUDGE handler runs (D24 I9).
+
+Two flavours of extract are defined here:
+
+* **Read extracts** (Phase 1, ``Email{SimpleText,MeetingInvite,
+  OrderConfirmation}Extract``) — graduate header / body content from
+  an untrusted Gmail message into trusted state.  Carry display-bound
+  strings derived from email headers (see provenance warning below).
+* **Write receipts** (Phase 1.5, ``Email{Send,Archive,MarkRead,Draft}
+  Result``) — graduate the small structured outcome of an
+  external-effect Gmail call (status literal + opaque ids + idempotency
+  booleans).  No body or header content; the only attacker-controlled
+  fields are opaque provider ids, which the JUDGE regex-bounds.
 
 Trust-model rationale
 ---------------------
@@ -99,6 +111,12 @@ class EmailReviewBriefing:
         "password expir", "ignore prior instructions", "act immediately",
     )
     extract_schema_version: str = "1.0"
+    # Phase 1.5: write-side PLANNERs populate the recipient set that
+    # was approved at the chat boundary.  The write-template REVIEWER
+    # cross-checks the script's receipt against this list so a hostile
+    # Gmail response cannot rewrite the to_addresses field on the
+    # graduating extract.  Read templates ignore this field.
+    staged_to_addresses: tuple[EmailPolicy, ...] = ()
 
 
 # ---------------------------------------------------------------------------
@@ -219,3 +237,134 @@ class EmailOrderConfirmationExtract(_EmailExtractBase):
     body_summary: str = ""
 
     flags: tuple[str, ...] = ()
+
+
+# ---------------------------------------------------------------------------
+# Phase 1.5 write-side receipts (REVIEWER -> JUDGE, pending until JUDGE approves)
+# ---------------------------------------------------------------------------
+#
+# Each write-tool EXECUTOR script emits a structured JSON receipt to a raw
+# Resource via ``files.write`` + ``resource.finalize``.  The REVIEWER reads
+# that receipt + the briefing, then derives one of the four receipt
+# dataclasses below.  The JUDGE handler validates the receipt before the
+# Resource graduates to trusted context.
+#
+# Threat model contrasts with the read extracts:
+#
+# * Receipts carry NO email body or header content.  The only fields are
+#   a status literal, the expected account email (EmailPolicy, validated
+#   by the dispatch wrapper), opaque Gmail-issued ids, recipient lists
+#   (EmailPolicy-typed, validated by the dispatch wrapper against the
+#   allowlist), and booleans.
+# * The provider-issued ``provider_message_id`` / ``draft_id`` are
+#   attacker-influenceable (a compromised token could plausibly steer
+#   them).  The JUDGE regex-bounds them to ``^[a-zA-Z0-9_-]{5,50}$``.
+# * Status fields are ``Literal[...]`` typed; the JUDGE rejects any other
+#   value rather than trusting the script's free-text status string.
+#
+# These dataclasses are NOT a substitute for the chat-boundary
+# allowlist check (T1 / I9) or the chat-boundary user confirm (I9) — the
+# write tool gates those before constructing the arc.  The
+# receipts merely give the chat agent a typed, JUDGE-bound view of the
+# operation's outcome so phrasing like "was_already_archived" is safe to
+# repeat back to the user.
+
+
+@dataclass(frozen=True)
+class EmailSendResult:
+    """Receipt from ``pkg_email_send_email``.
+
+    Attributes:
+        status: Always the literal ``"sent"`` on graduation; the JUDGE
+            rejects any other value.  Errors short-circuit before the
+            REVIEWER runs (the EXECUTOR script raises and the arc
+            fails).
+        expected_account_email: The mailbox the OAuth token belonged to
+            at send time, copied from briefing.  Allowlist-validated.
+        provider_message_id: Gmail's message id for the sent message.
+            Opaque string; JUDGE bounds shape.
+        to_addresses: Recipient set that was approved at the chat
+            boundary and copied from briefing.staged_to_addresses.
+            Each is EmailPolicy-typed so the dispatch wrapper rejects
+            any address that has since been removed from the allowlist.
+        schema_version: Bumped by package author when the dataclass
+            shape changes.
+    """
+
+    status: str = "sent"
+    expected_account_email: EmailPolicy = field(
+        default_factory=lambda: EmailPolicy(""),
+    )
+    provider_message_id: str = ""
+    to_addresses: tuple[EmailPolicy, ...] = ()
+    schema_version: str = "1.0"
+
+
+@dataclass(frozen=True)
+class EmailArchiveResult:
+    """Receipt from ``pkg_email_archive_email``.
+
+    Attributes:
+        status: Literal ``"archived"`` on graduation.
+        expected_account_email: Mailbox the OAuth token belonged to.
+        provider_message_id: Gmail message id that was archived.
+        was_already_archived: True if the message had no ``INBOX``
+            label at script time (the modify call was therefore a
+            no-op).  Lets the chat agent phrase idempotency honestly.
+        schema_version: Schema version.
+    """
+
+    status: str = "archived"
+    expected_account_email: EmailPolicy = field(
+        default_factory=lambda: EmailPolicy(""),
+    )
+    provider_message_id: str = ""
+    was_already_archived: bool = False
+    schema_version: str = "1.0"
+
+
+@dataclass(frozen=True)
+class EmailMarkReadResult:
+    """Receipt from ``pkg_email_mark_read_email``.
+
+    Attributes:
+        status: Literal ``"marked_read"`` on graduation.
+        expected_account_email: Mailbox the OAuth token belonged to.
+        provider_message_id: Gmail message id that was marked read.
+        was_already_read: True if the message had no ``UNREAD`` label
+            at script time.
+        schema_version: Schema version.
+    """
+
+    status: str = "marked_read"
+    expected_account_email: EmailPolicy = field(
+        default_factory=lambda: EmailPolicy(""),
+    )
+    provider_message_id: str = ""
+    was_already_read: bool = False
+    schema_version: str = "1.0"
+
+
+@dataclass(frozen=True)
+class EmailDraftResult:
+    """Receipt from ``pkg_email_draft_email``.
+
+    Attributes:
+        status: Literal ``"drafted"`` on graduation.
+        expected_account_email: Mailbox the OAuth token belonged to.
+        provider_message_id: Gmail-assigned id of the staged message
+            inside the draft.
+        draft_id: Gmail-assigned id of the draft container itself.
+        to_addresses: Recipients staged on the draft, copied from the
+            briefing's ``staged_to_addresses``.  Allowlist-validated.
+        schema_version: Schema version.
+    """
+
+    status: str = "drafted"
+    expected_account_email: EmailPolicy = field(
+        default_factory=lambda: EmailPolicy(""),
+    )
+    provider_message_id: str = ""
+    draft_id: str = ""
+    to_addresses: tuple[EmailPolicy, ...] = ()
+    schema_version: str = "1.0"

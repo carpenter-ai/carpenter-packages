@@ -1,16 +1,27 @@
 name: carpenter-email
-version: "0.2.0"
+version: "0.3.0"
 description: |
-  Email assistant package (Gmail API backend).  Phase 1 ships read
+  Email assistant package (Gmail API backend).  Phase 1 shipped read
   templates through the D24 untrusted-data pipeline and send mail
-  with expected-account safety check.  Phase 1.5 (this version) adds
+  with an expected-account safety check.  Phase 1.5 (v0.2.0) added
   three external-effect modify tools — pkg_email_archive_email,
   pkg_email_mark_read_email, pkg_email_draft_email — each guarded by
   a chat-boundary human-confirm and an in-script expected-account
-  check.  Read-side ships three review templates (simple text,
-  meeting invite, order confirmation), each with a REVIEWER + JUDGE
-  pipeline that gates body content behind deterministic policy
-  checks before it can reach trusted context.
+  check.
+
+  Phase 1.5 v2 (this version, 0.3.0) makes ALL four write tools
+  (send, archive, mark-read, draft) go through the full untrusted-
+  data graduation pipeline: an EXECUTOR arc that POSTs to Gmail and
+  writes a small structured receipt as an untrusted Resource, a
+  REVIEWER arc with a static prompt that extracts a typed
+  EmailXxxResult dataclass, and a deterministic Python JUDGE that
+  bounds-checks every field before graduating the extract to
+  trusted state.  This closes the trust-invariant I3 hole in the
+  earlier modify shape (untrusted Gmail bytes flowing back into
+  chat context without ever passing JUDGE).
+
+  Read-side ships three review templates (simple text, meeting
+  invite, order confirmation), unchanged.
 
 chat_tools:
   - tools.py
@@ -20,18 +31,25 @@ kb_namespace: email
 platform_compatibility:
   - any
 
-# Trust-graduating dataclasses (D24 SD11).  Each read template emits
-# its own kind so a malicious REVIEWER cannot upcast a
-# meeting-invite extract into an order-confirmation extract.
+# Trust-graduating dataclasses (D24 SD11).  Each read or write
+# template emits its own kind so a malicious REVIEWER cannot upcast
+# (e.g.) a meeting-invite extract into an order-confirmation
+# extract, nor an archive receipt into a send receipt.
 data_models:
   - EmailReviewBriefing
   - EmailSimpleTextExtract
   - EmailMeetingInviteExtract
   - EmailOrderConfirmationExtract
+  - EmailSendResult
+  - EmailArchiveResult
+  - EmailMarkReadResult
+  - EmailDraftResult
 
-# Three Phase 1 read templates, one per email kind.  Each has the
-# canonical PLANNER -> EXECUTOR (untrusted Gmail fetch) -> REVIEWER
-# (constrained, static prompt) -> JUDGE (deterministic) shape.
+# Seven templates total: three Phase 1 read templates plus four
+# Phase 1.5 v2 write templates.  All seven share the canonical
+# PLANNER -> EXECUTOR (untrusted Gmail call) -> REVIEWER
+# (constrained, static prompt, no KB, only derive_resource) ->
+# JUDGE (deterministic Python) shape.
 arc_templates:
   - name: email_read_simple_text
     path: templates/email-read-simple-text/template.yaml
@@ -48,6 +66,26 @@ arc_templates:
     briefing_kind: EmailReviewBriefing
     extract_kind: EmailOrderConfirmationExtract
     judge_handler: judges:judge_order_confirmation
+  - name: email_write_send
+    path: templates/email-write-send/template.yaml
+    briefing_kind: EmailReviewBriefing
+    extract_kind: EmailSendResult
+    judge_handler: judges:judge_email_send
+  - name: email_write_archive
+    path: templates/email-write-archive/template.yaml
+    briefing_kind: EmailReviewBriefing
+    extract_kind: EmailArchiveResult
+    judge_handler: judges:judge_email_archive
+  - name: email_write_mark_read
+    path: templates/email-write-mark-read/template.yaml
+    briefing_kind: EmailReviewBriefing
+    extract_kind: EmailMarkReadResult
+    judge_handler: judges:judge_email_mark_read
+  - name: email_write_draft
+    path: templates/email-write-draft/template.yaml
+    briefing_kind: EmailReviewBriefing
+    extract_kind: EmailDraftResult
+    judge_handler: judges:judge_email_draft
 
 judge_handlers:
   - name: judge_simple_text
@@ -55,6 +93,14 @@ judge_handlers:
   - name: judge_meeting_invite
     module: judges
   - name: judge_order_confirmation
+    module: judges
+  - name: judge_email_send
+    module: judges
+  - name: judge_email_archive
+    module: judges
+  - name: judge_email_mark_read
+    module: judges
+  - name: judge_email_draft
     module: judges
 
 # KB articles seeded into kb/email/* on install.
@@ -83,9 +129,10 @@ allowlist_proposals:
 
 # Gmail OAuth credential requirement.  Phase 1 needed gmail.readonly
 # (for list/search/read), gmail.send (for send_email), and
-# userinfo.email (for the expected-account check).  Phase 1.5 adds
+# userinfo.email (for the expected-account check).  Phase 1.5 added
 # gmail.modify (archive + mark-read use ``users.messages.modify``
 # with ``removeLabelIds``) and gmail.compose (for draft creation).
+# Phase 1.5 v2 does not introduce any new scope demands.
 #
 # Why five explicit scopes instead of collapsing to gmail.modify:
 # gmail.modify alone would grant delete-message authority.  We

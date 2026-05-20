@@ -358,6 +358,19 @@ success back through the arc-completion notify channel:
 
 ## 6.5 First use — archive and mark-read (Phase 1.5)
 
+> **Note (v0.3.0, Phase 1.5 v2).** All four write tools
+> (`pkg_email_send_email`, `pkg_email_archive_email`,
+> `pkg_email_mark_read_email`, `pkg_email_draft_email`) now run
+> through the full PLANNER -> EXECUTOR -> REVIEWER -> JUDGE
+> graduation pipeline.  The Gmail HTTP response is written as an
+> *untrusted* Resource by the EXECUTOR, a constrained REVIEWER
+> extracts a typed `EmailXxxResult` dataclass, and a deterministic
+> Python JUDGE bounds-checks every field before the result Resource
+> graduates to trusted state.  Earlier 0.2.0 builds shipped an
+> EXECUTOR-only shape that bypassed the JUDGE; if you were running
+> 0.2.0 you should reinstall this version before relying on the
+> archive / mark-read / draft tools.
+
 Once you've read a message you can archive it or mark it read without
 ever copying body content back into chat context.
 
