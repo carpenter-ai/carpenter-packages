@@ -216,14 +216,20 @@ def _create_read_arc_tree(
         arc_id=executor_arc_id, resource_id=raw_resource_id, role="output",
     )
 
-    # 4) Briefing Resource (PLANNER outputs; born-trusted by PLANNER)
-    #    We pre-create the row so the PLANNER's derive_resource call
-    #    can target a known id; the PLANNER fills in the bytes.
+    # 4) Briefing Resource (PLANNER outputs; born-trusted by PLANNER).
+    #    We pre-create the row so the PLANNER's derive_resource call can
+    #    target a known id; the PLANNER fills in the bytes.  The
+    #    platform's resource_trust() rule requires
+    #    ``produced_by_template != None AND template_verdict ==
+    #    'approved'`` for trusted state, so we tag the briefing with
+    #    this template's name and an approved verdict.  That makes the
+    #    briefing trusted-by-construction, which is what born-trusted
+    #    PLANNER state should be.
     briefing_resource_id = _derive_resource(
         content_type="dataclass",
         file_path=None,
         produced_by_arc_id=parent_id,
-        produced_by_template=None,  # born trusted by trusted PLANNER
+        produced_by_template=template_name,
         template_verdict="approved",
         source_descriptor=f"briefing:{template_name}",
     )
@@ -1092,12 +1098,15 @@ def _create_write_arc_tree(
         arc_id=executor_arc_id, resource_id=raw_resource_id, role="output",
     )
 
-    # 4) Briefing Resource (PLANNER outputs; born-trusted by PLANNER)
+    # 4) Briefing Resource (PLANNER outputs; born-trusted by PLANNER).
+    #    See the equivalent block in _create_read_arc_tree for why we
+    #    tag with this template's name + approved verdict to satisfy
+    #    resource_trust()'s rule for trusted state.
     briefing_resource_id = _derive_resource(
         content_type="dataclass",
         file_path=None,
         produced_by_arc_id=parent_id,
-        produced_by_template=None,  # born trusted by trusted PLANNER
+        produced_by_template=template_name,
         template_verdict="approved",
         source_descriptor=f"briefing:{template_name}",
     )
