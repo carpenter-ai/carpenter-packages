@@ -81,20 +81,30 @@ dispatch(Label("resource.finalize"), {"resource_id": raw_resource_id})
 # Gmail send script.
 #
 # The chat tool pre-seeds the EXECUTOR's arc state with:
-#   * raw_message_b64 : str  (RFC-822 raw message, base64url-encoded)
-#   * expected_account_email : str (mailbox we expect to send from)
+#   * raw_message_b64        : str  (RFC-822 raw message, base64url-encoded)
+#   * expected_account_email : str  (mailbox we expect to send from)
+#   * raw_resource_path      : str  (where to write the JSON receipt)
+#   * raw_resource_id        : int  (the Resource row to finalize)
 #
 # The script first verifies the access token's account email matches
 # expected_account_email (defence against a swapped-in refresh token
-# attack at the chat-boundary trust check), then POSTs the message.
+# attack at the chat-boundary trust check), then POSTs the message,
+# parses the Gmail-issued message id out of the response, and writes a
+# structured JSON receipt to the raw Resource so the REVIEWER + JUDGE
+# can graduate a typed EmailSendResult dataclass into trusted state.
 GMAIL_SEND_SCRIPT = '''\
 from carpenter_tools.declarations import Label
 import os
+import json as _json
 
 raw_result = dispatch(Label("state.get"), {"key": Label("raw_message_b64")})
 raw_b64 = raw_result[Label("value")]
 exp_result = dispatch(Label("state.get"), {"key": Label("expected_account_email")})
 expected = exp_result[Label("value")]
+path_result = dispatch(Label("state.get"), {"key": Label("raw_resource_path")})
+output_path = path_result[Label("value")]
+rid_result = dispatch(Label("state.get"), {"key": Label("raw_resource_id")})
+raw_resource_id = rid_result[Label("value")]
 
 access_token = os.environ.get("GMAIL_OAUTH_ACCESS_TOKEN", "")
 if not access_token:
@@ -113,7 +123,6 @@ if who_status != 200:
     raise RuntimeError(
         "userinfo lookup failed: status=" + str(who_status)
     )
-import json as _json
 who_body = _json.loads(who[Label("text")])
 actual = (who_body.get("email") or "").strip().lower()
 if actual != (expected or "").strip().lower():
@@ -137,10 +146,21 @@ if send_status not in (200, 202):
         "Gmail send failed: status=" + str(send_status)
         + " body=" + send_result[Label("text")][:200]
     )
-dispatch(Label("state.set"), {
-    "key": Label("_agent_response"),
-    "value": "Email sent (status=" + str(send_status) + ").",
+send_body = _json.loads(send_result[Label("text")])
+provider_message_id = send_body.get("id") or ""
+
+# Step 3: write a structured receipt for the REVIEWER + JUDGE.
+receipt = {
+    "operation": "send",
+    "expected_account_email": actual,
+    "provider_message_id": provider_message_id,
+    "status_code": send_status,
+}
+dispatch(Label("files.write"), {
+    "path": output_path,
+    "content": _json.dumps(receipt),
 })
+dispatch(Label("resource.finalize"), {"resource_id": raw_resource_id})
 '''
 
 
@@ -202,13 +222,17 @@ dispatch(Label("resource.finalize"), {"resource_id": raw_resource_id})
 # The chat tool pre-seeds the EXECUTOR's arc state with:
 #   * provider_message_id     : str  (Gmail message id to archive)
 #   * expected_account_email  : str  (mailbox we expect to be acting on)
+#   * raw_resource_path       : str  (where to write the JSON receipt)
+#   * raw_resource_id         : int  (the Resource row to finalize)
 #
 # "Archive" in Gmail terms means removing the INBOX label.  The script
 # first verifies the OAuth token's account email matches expected
 # (defence against a swapped-in refresh token), reads the message's
-# current labelIds to determine ``was_already_archived``, then POSTs
-# the modify request.  Idempotent: Gmail's modify endpoint accepts
-# ``removeLabelIds=["INBOX"]`` even when the label is already absent.
+# current labelIds to determine ``was_already_archived``, POSTs the
+# modify request, then writes a structured receipt to the raw Resource
+# for the REVIEWER + JUDGE to graduate as an EmailArchiveResult.
+# Idempotent: Gmail's modify endpoint accepts ``removeLabelIds=["INBOX"]``
+# even when the label is already absent.
 GMAIL_ARCHIVE_SCRIPT = '''\
 from carpenter_tools.declarations import Label
 import os
@@ -218,6 +242,10 @@ mid_result = dispatch(Label("state.get"), {"key": Label("provider_message_id")})
 mid = mid_result[Label("value")]
 exp_result = dispatch(Label("state.get"), {"key": Label("expected_account_email")})
 expected = exp_result[Label("value")]
+path_result = dispatch(Label("state.get"), {"key": Label("raw_resource_path")})
+output_path = path_result[Label("value")]
+rid_result = dispatch(Label("state.get"), {"key": Label("raw_resource_id")})
+raw_resource_id = rid_result[Label("value")]
 
 access_token = os.environ.get("GMAIL_OAUTH_ACCESS_TOKEN", "")
 if not access_token:
@@ -284,13 +312,19 @@ if modify_status not in (200, 202):
         + " body=" + modify_result[Label("text")][:200]
     )
 
-dispatch(Label("state.set"), {
-    "key": Label("_agent_response"),
-    "value": (
-        "Email archived (message_id=" + mid
-        + ", was_already_archived=" + str(was_already_archived) + ")."
-    ),
+# Step 4: write a structured receipt for the REVIEWER + JUDGE.
+receipt = {
+    "operation": "archive",
+    "expected_account_email": actual,
+    "provider_message_id": mid,
+    "was_already_archived": was_already_archived,
+    "status_code": modify_status,
+}
+dispatch(Label("files.write"), {
+    "path": output_path,
+    "content": _json.dumps(receipt),
 })
+dispatch(Label("resource.finalize"), {"resource_id": raw_resource_id})
 '''
 
 
@@ -299,10 +333,13 @@ dispatch(Label("state.set"), {
 # The chat tool pre-seeds the EXECUTOR's arc state with:
 #   * provider_message_id     : str
 #   * expected_account_email  : str
+#   * raw_resource_path       : str  (where to write the JSON receipt)
+#   * raw_resource_id         : int  (the Resource row to finalize)
 #
 # Mark-read removes the UNREAD label.  Same shape as the archive
 # script: expected-account check, read current labelIds to compute
-# was_already_read, then modify.
+# was_already_read, modify, then emit a structured receipt for the
+# REVIEWER + JUDGE to graduate as an EmailMarkReadResult.
 GMAIL_MARK_READ_SCRIPT = '''\
 from carpenter_tools.declarations import Label
 import os
@@ -312,6 +349,10 @@ mid_result = dispatch(Label("state.get"), {"key": Label("provider_message_id")})
 mid = mid_result[Label("value")]
 exp_result = dispatch(Label("state.get"), {"key": Label("expected_account_email")})
 expected = exp_result[Label("value")]
+path_result = dispatch(Label("state.get"), {"key": Label("raw_resource_path")})
+output_path = path_result[Label("value")]
+rid_result = dispatch(Label("state.get"), {"key": Label("raw_resource_id")})
+raw_resource_id = rid_result[Label("value")]
 
 access_token = os.environ.get("GMAIL_OAUTH_ACCESS_TOKEN", "")
 if not access_token:
@@ -378,13 +419,19 @@ if modify_status not in (200, 202):
         + " body=" + modify_result[Label("text")][:200]
     )
 
-dispatch(Label("state.set"), {
-    "key": Label("_agent_response"),
-    "value": (
-        "Email marked read (message_id=" + mid
-        + ", was_already_read=" + str(was_already_read) + ")."
-    ),
+# Step 4: write a structured receipt for the REVIEWER + JUDGE.
+receipt = {
+    "operation": "mark_read",
+    "expected_account_email": actual,
+    "provider_message_id": mid,
+    "was_already_read": was_already_read,
+    "status_code": modify_status,
+}
+dispatch(Label("files.write"), {
+    "path": output_path,
+    "content": _json.dumps(receipt),
 })
+dispatch(Label("resource.finalize"), {"resource_id": raw_resource_id})
 '''
 
 
@@ -393,13 +440,16 @@ dispatch(Label("state.set"), {
 # The chat tool pre-seeds the EXECUTOR's arc state with:
 #   * raw_message_b64        : str  (RFC-822 raw message, base64url-encoded)
 #   * expected_account_email : str  (mailbox we expect to be drafting under)
+#   * raw_resource_path      : str  (where to write the JSON receipt)
+#   * raw_resource_id        : int  (the Resource row to finalize)
 #
 # Each call creates a NEW draft.  There is no update-draft tool in
 # Phase 1.5 because sending a stale draft would bypass the chat-boundary
 # re-confirm on body content; updates would need to round-trip back
-# through pkg_email_send_email re-confirmation.  Returns the
-# Gmail-assigned draft_id and the provider_message_id of the staged
-# message via _agent_response so the chat agent can phrase correctly.
+# through pkg_email_send_email re-confirmation.  The Gmail-assigned
+# draft_id and provider_message_id of the staged message are written
+# to the raw Resource for the REVIEWER + JUDGE to graduate as an
+# EmailDraftResult.
 GMAIL_DRAFT_SCRIPT = '''\
 from carpenter_tools.declarations import Label
 import os
@@ -409,6 +459,10 @@ raw_result = dispatch(Label("state.get"), {"key": Label("raw_message_b64")})
 raw_b64 = raw_result[Label("value")]
 exp_result = dispatch(Label("state.get"), {"key": Label("expected_account_email")})
 expected = exp_result[Label("value")]
+path_result = dispatch(Label("state.get"), {"key": Label("raw_resource_path")})
+output_path = path_result[Label("value")]
+rid_result = dispatch(Label("state.get"), {"key": Label("raw_resource_id")})
+raw_resource_id = rid_result[Label("value")]
 
 access_token = os.environ.get("GMAIL_OAUTH_ACCESS_TOKEN", "")
 if not access_token:
@@ -455,11 +509,17 @@ draft_id = draft_body.get("id") or ""
 message = draft_body.get("message") or {}
 provider_message_id = message.get("id") or ""
 
-dispatch(Label("state.set"), {
-    "key": Label("_agent_response"),
-    "value": (
-        "Draft created (draft_id=" + draft_id
-        + ", provider_message_id=" + provider_message_id + ")."
-    ),
+# Step 3: write a structured receipt for the REVIEWER + JUDGE.
+receipt = {
+    "operation": "draft",
+    "expected_account_email": actual,
+    "provider_message_id": provider_message_id,
+    "draft_id": draft_id,
+    "status_code": draft_status,
+}
+dispatch(Label("files.write"), {
+    "path": output_path,
+    "content": _json.dumps(receipt),
 })
+dispatch(Label("resource.finalize"), {"resource_id": raw_resource_id})
 '''

@@ -23,12 +23,17 @@ Trust contract (D24 I3):
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
 from .data_models import (
+    EmailArchiveResult,
+    EmailDraftResult,
+    EmailMarkReadResult,
     EmailMeetingInviteExtract,
     EmailOrderConfirmationExtract,
+    EmailSendResult,
     EmailSimpleTextExtract,
 )
 
@@ -297,4 +302,231 @@ def judge_order_confirmation(extract: Any) -> JudgeVerdict:
             return JudgeVerdict.reject(
                 f"item {item[:32]!r} contains control characters",
             )
+    return JudgeVerdict.approve()
+
+
+# ---------------------------------------------------------------------------
+# Phase 1.5 write-receipt handlers
+# ---------------------------------------------------------------------------
+#
+# Each write-tool template produces one of the EmailXxxResult dataclasses
+# from a small Gmail HTTP response.  The JUDGE handlers below validate
+# the structural surface — the EmailPolicy fields are already validated
+# by the dispatch wrapper before we run.
+
+
+# Gmail-issued message and draft ids are opaque base64-url-like strings.
+# We bound the alphabet and length tightly so a malicious response body
+# cannot smuggle a payload through this field.
+_PROVIDER_ID_RE = re.compile(r"^[a-zA-Z0-9_-]{5,50}$")
+
+_MAX_RECIPIENTS = 32
+
+
+def _check_provider_message_id(value: Any) -> str | None:
+    """Return ``None`` if ``value`` is a valid Gmail provider id."""
+    if not isinstance(value, str):
+        return f"provider_message_id is not a string: {type(value).__name__}"
+    if not _PROVIDER_ID_RE.match(value):
+        return (
+            f"provider_message_id {value!r} does not match expected "
+            f"shape ^[a-zA-Z0-9_-]{{5,50}}$"
+        )
+    return None
+
+
+def _check_draft_id(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return f"draft_id is not a string: {type(value).__name__}"
+    if not _PROVIDER_ID_RE.match(value):
+        return (
+            f"draft_id {value!r} does not match expected shape "
+            f"^[a-zA-Z0-9_-]{{5,50}}$"
+        )
+    return None
+
+
+def _check_expected_account(value: Any) -> str | None:
+    """Return ``None`` if ``value`` is a non-empty EmailPolicy literal.
+
+    The dispatch wrapper has already validated the allowlist membership
+    on ``EmailPolicy`` fields; here we just guard against the empty
+    default (an unset expected_account would make the entire trust
+    chain unenforceable).
+    """
+    s = str(value or "").strip()
+    if not s:
+        return "expected_account_email is empty"
+    if _has_control_chars(s):
+        return "expected_account_email contains control characters"
+    return None
+
+
+def _check_recipient_list(
+    name: str, value: Any, *, allow_empty: bool,
+) -> str | None:
+    """Validate a ``tuple[EmailPolicy, ...]`` recipient field.
+
+    The dispatch wrapper has already validated each entry against the
+    email allowlist.  We additionally enforce: non-empty (where
+    required), bounded length, every entry is a non-empty string with
+    no control characters.
+    """
+    if not isinstance(value, tuple):
+        return f"{name} is not a tuple: {type(value).__name__}"
+    if not value:
+        if allow_empty:
+            return None
+        return f"{name} is empty"
+    if len(value) > _MAX_RECIPIENTS:
+        return f"{name} has {len(value)} entries (max {_MAX_RECIPIENTS})"
+    for entry in value:
+        s = str(entry or "").strip()
+        if not s:
+            return f"{name} contains an empty entry"
+        if _has_control_chars(s):
+            return f"{name} entry {s[:32]!r} contains control characters"
+    return None
+
+
+def _check_write_schema_version(value: Any) -> str | None:
+    if value != _SCHEMA_VERSION:
+        return (
+            f"unknown schema_version {value!r} "
+            f"(expected {_SCHEMA_VERSION!r})"
+        )
+    return None
+
+
+def judge_email_send(extract: Any) -> JudgeVerdict:
+    """JUDGE for the ``email_write_send`` template.
+
+    Approves only if:
+
+    * the dataclass type matches (belt-and-braces; the dispatch wrapper
+      enforces this too);
+    * ``status`` is exactly ``"sent"`` (Literal-style validation done
+      in Python — the field is a plain ``str`` on the dataclass so the
+      JUDGE is the trust gate);
+    * ``schema_version`` matches the package's current version;
+    * ``expected_account_email`` is set and control-free;
+    * ``provider_message_id`` matches the Gmail-id shape;
+    * ``to_addresses`` is non-empty and bounded — the dispatch wrapper
+      has already validated each address against the email allowlist.
+    """
+    if not isinstance(extract, EmailSendResult):
+        return JudgeVerdict.reject(
+            f"expected EmailSendResult, got {type(extract).__name__}",
+        )
+    err = _check_write_schema_version(extract.schema_version)
+    if err:
+        return JudgeVerdict.reject(err)
+    if extract.status != "sent":
+        return JudgeVerdict.reject(
+            f"status {extract.status!r} is not the literal 'sent'",
+        )
+    err = _check_expected_account(extract.expected_account_email)
+    if err:
+        return JudgeVerdict.reject(err)
+    err = _check_provider_message_id(extract.provider_message_id)
+    if err:
+        return JudgeVerdict.reject(err)
+    err = _check_recipient_list(
+        "to_addresses", extract.to_addresses, allow_empty=False,
+    )
+    if err:
+        return JudgeVerdict.reject(err)
+    return JudgeVerdict.approve()
+
+
+def judge_email_archive(extract: Any) -> JudgeVerdict:
+    """JUDGE for the ``email_write_archive`` template.
+
+    Approves when the receipt structurally describes a successful
+    archive (or idempotent no-op archive) of one Gmail message.
+    """
+    if not isinstance(extract, EmailArchiveResult):
+        return JudgeVerdict.reject(
+            f"expected EmailArchiveResult, got {type(extract).__name__}",
+        )
+    err = _check_write_schema_version(extract.schema_version)
+    if err:
+        return JudgeVerdict.reject(err)
+    if extract.status != "archived":
+        return JudgeVerdict.reject(
+            f"status {extract.status!r} is not the literal 'archived'",
+        )
+    err = _check_expected_account(extract.expected_account_email)
+    if err:
+        return JudgeVerdict.reject(err)
+    err = _check_provider_message_id(extract.provider_message_id)
+    if err:
+        return JudgeVerdict.reject(err)
+    if not isinstance(extract.was_already_archived, bool):
+        return JudgeVerdict.reject(
+            f"was_already_archived is not a bool: "
+            f"{type(extract.was_already_archived).__name__}",
+        )
+    return JudgeVerdict.approve()
+
+
+def judge_email_mark_read(extract: Any) -> JudgeVerdict:
+    """JUDGE for the ``email_write_mark_read`` template."""
+    if not isinstance(extract, EmailMarkReadResult):
+        return JudgeVerdict.reject(
+            f"expected EmailMarkReadResult, got {type(extract).__name__}",
+        )
+    err = _check_write_schema_version(extract.schema_version)
+    if err:
+        return JudgeVerdict.reject(err)
+    if extract.status != "marked_read":
+        return JudgeVerdict.reject(
+            f"status {extract.status!r} is not the literal 'marked_read'",
+        )
+    err = _check_expected_account(extract.expected_account_email)
+    if err:
+        return JudgeVerdict.reject(err)
+    err = _check_provider_message_id(extract.provider_message_id)
+    if err:
+        return JudgeVerdict.reject(err)
+    if not isinstance(extract.was_already_read, bool):
+        return JudgeVerdict.reject(
+            f"was_already_read is not a bool: "
+            f"{type(extract.was_already_read).__name__}",
+        )
+    return JudgeVerdict.approve()
+
+
+def judge_email_draft(extract: Any) -> JudgeVerdict:
+    """JUDGE for the ``email_write_draft`` template.
+
+    Validates both the staged-message id and the draft container id,
+    plus a non-empty recipient set that survived the dispatch
+    wrapper's allowlist check.
+    """
+    if not isinstance(extract, EmailDraftResult):
+        return JudgeVerdict.reject(
+            f"expected EmailDraftResult, got {type(extract).__name__}",
+        )
+    err = _check_write_schema_version(extract.schema_version)
+    if err:
+        return JudgeVerdict.reject(err)
+    if extract.status != "drafted":
+        return JudgeVerdict.reject(
+            f"status {extract.status!r} is not the literal 'drafted'",
+        )
+    err = _check_expected_account(extract.expected_account_email)
+    if err:
+        return JudgeVerdict.reject(err)
+    err = _check_provider_message_id(extract.provider_message_id)
+    if err:
+        return JudgeVerdict.reject(err)
+    err = _check_draft_id(extract.draft_id)
+    if err:
+        return JudgeVerdict.reject(err)
+    err = _check_recipient_list(
+        "to_addresses", extract.to_addresses, allow_empty=False,
+    )
+    if err:
+        return JudgeVerdict.reject(err)
     return JudgeVerdict.approve()

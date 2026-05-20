@@ -1,0 +1,51 @@
+name: email_write_archive
+description: |
+  Archive one Gmail message (remove the INBOX label) and emit a
+  structured EmailArchiveResult receipt.  PLANNER prepares an
+  EmailReviewBriefing; EXECUTOR submits the pre-verified Gmail
+  archive script (which checks idempotency and writes a JSON receipt
+  to a raw Resource); REVIEWER derives one pending EmailArchiveResult;
+  the package JUDGE validates the receipt structurally before the
+  Resource graduates to trusted state.
+steps:
+  - name: prepare-briefing
+    description: |
+      Construct EmailReviewBriefing from the global SecurityPolicies.email
+      allowlist snapshot and the static suspicious-keyword list, then
+      derive_resource it as born-trusted.  Trusted PLANNER context.
+    order: 0
+    agent_type: PLANNER
+    model_policy: fast-chat
+  - name: archive-gmail
+    description: |
+      Untrusted EXECUTOR step.  Submits the pre-verified archive
+      script, which reads provider_message_id / expected_account_email
+      / raw_resource_path / raw_resource_id from arc state, verifies
+      the OAuth token belongs to the expected account, reads the
+      message's current labelIds to compute was_already_archived,
+      POSTs the modify request (idempotent removal of the INBOX
+      label), and writes a structured JSON receipt to the raw
+      Resource.  No KB access; egress restricted to gmail.googleapis.com
+      / oauth2.googleapis.com via the platform domain allowlist.
+    order: 1
+    agent_type: EXECUTOR
+    integrity_level: untrusted
+    model_policy: background-batch
+  - name: review-receipt
+    description: |
+      Constrained REVIEWER step with a static prompt shipped from the
+      package.  Reads briefing + raw JSON receipt; writes one pending
+      EmailArchiveResult Resource via derive_resource.  No KB access.
+    order: 2
+    agent_type: REVIEWER
+    model_policy: careful-coding
+    arc_role: verifier
+  - name: judge-receipt
+    description: |
+      Deterministic JUDGE step — handled by the platform's
+      ``_try_package_judge`` dispatch, which loads the extract
+      Resource bytes, deserialises into EmailArchiveResult, validates
+      every PolicyLiteral field against SecurityPolicies, and calls
+      ``judges:judge_email_archive``.  No AI agent.
+    order: 3
+    agent_type: JUDGE

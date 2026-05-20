@@ -1,0 +1,57 @@
+name: email_write_send
+description: |
+  Send one Gmail message and emit a structured EmailSendResult
+  receipt.  PLANNER prepares an EmailReviewBriefing containing the
+  recipient set approved at the chat boundary; EXECUTOR submits the
+  pre-verified Gmail send script (which writes a JSON receipt into a
+  raw Resource); REVIEWER reads briefing + receipt and derives one
+  pending EmailSendResult; the package JUDGE validates the receipt
+  structurally before the Resource graduates to trusted state.
+steps:
+  - name: prepare-briefing
+    description: |
+      Construct EmailReviewBriefing (with staged_to_addresses set to
+      the recipient set the chat boundary approved) from the global
+      SecurityPolicies.email allowlist snapshot and the static
+      suspicious-keyword list, then derive_resource it as born-trusted.
+      Trusted PLANNER context.
+    order: 0
+    agent_type: PLANNER
+    model_policy: fast-chat
+  - name: send-gmail
+    description: |
+      Untrusted EXECUTOR step.  Submits the pre-verified send script,
+      which reads raw_message_b64 / expected_account_email /
+      raw_resource_path / raw_resource_id from arc state, verifies the
+      OAuth token belongs to the expected account, POSTs the message
+      via gmail.users.messages.send, parses the Gmail-assigned message
+      id out of the response, and writes a structured JSON receipt to
+      the raw Resource on disk.  No KB access; egress restricted to
+      gmail.googleapis.com / oauth2.googleapis.com via the platform
+      domain allowlist.
+    order: 1
+    agent_type: EXECUTOR
+    integrity_level: untrusted
+    model_policy: background-batch
+  - name: review-receipt
+    description: |
+      Constrained REVIEWER step with a static prompt shipped from the
+      package.  Reads briefing + raw JSON receipt; writes one pending
+      EmailSendResult Resource via derive_resource.  No KB access
+      (defence-in-depth against prompt injection through the Gmail
+      response).
+    order: 2
+    agent_type: REVIEWER
+    model_policy: careful-coding
+    arc_role: verifier
+  - name: judge-receipt
+    description: |
+      Deterministic JUDGE step — handled by the platform's
+      ``_try_package_judge`` dispatch, which loads the extract
+      Resource bytes, deserialises into EmailSendResult, validates
+      every PolicyLiteral field against SecurityPolicies, and calls
+      ``judges:judge_email_send``.  On approve the Resource's
+      template_verdict flips to 'approved' and the parent can read it.
+      No AI agent.
+    order: 3
+    agent_type: JUDGE
