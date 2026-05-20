@@ -359,6 +359,8 @@ def pkg_email_authorize(tool_input, **kwargs):
             scopes=[
                 "https://www.googleapis.com/auth/gmail.readonly",
                 "https://www.googleapis.com/auth/gmail.send",
+                "https://www.googleapis.com/auth/gmail.modify",
+                "https://www.googleapis.com/auth/gmail.compose",
                 "https://www.googleapis.com/auth/userinfo.email",
             ],
             env_key_prefix=_ENV_KEY_PREFIX,
@@ -367,6 +369,12 @@ def pkg_email_authorize(tool_input, **kwargs):
                 # Force Google to issue a refresh_token even on repeat consent.
                 "access_type": "offline",
                 "prompt": "consent",
+                # Phase 1.5 OAuth-migration helper: incrementally augment
+                # any existing v0.1.0 grant (gmail.readonly + gmail.send +
+                # userinfo.email) with the new gmail.modify + gmail.compose
+                # scopes rather than replacing the existing grant.  See
+                # SETUP.md for the user-facing migration walk-through.
+                "include_granted_scopes": "true",
             },
         )
         return json.dumps({
@@ -928,3 +936,351 @@ def pkg_email_untrust_sender(tool_input, **kwargs):
     removed = policy_store.remove_from_allowlist("email", addr)
     get_policies().remove("email", addr)
     return json.dumps({"accepted": True, "removed": bool(removed), "email": addr})
+
+
+# ---------------------------------------------------------------------------
+# Phase 1.5: external-effect modify tools (archive / mark-read / draft)
+#
+# All three tools share the same trust shape as ``pkg_email_send_email``:
+# a single-arc untrusted EXECUTOR pipeline guarded by
+# ``requires_user_confirm=True`` at the chat boundary plus an in-script
+# expected-account check.  They are deliberately NOT U->T graduations
+# (no REVIEWER + JUDGE), because no untrusted data is being promoted to
+# trusted context — the side-effect on Gmail IS the operation.
+# ---------------------------------------------------------------------------
+
+
+def _create_modify_arc(
+    *,
+    template_label: str,
+    arc_name: str,
+    arc_goal: str,
+    script: str,
+    state_seed: dict,
+    expected_account_email: str,
+    conversation_id: int | None,
+) -> dict:
+    """Construct a single-arc untrusted EXECUTOR pipeline for a Gmail
+    modify-style operation (archive / mark-read / draft-create).
+
+    Mirrors ``pkg_email_send_email``'s arc construction exactly.  The
+    caller is responsible for chat-boundary recipient-allowlist checks
+    where applicable (draft); archive and mark-read have no recipient
+    surface.
+
+    Args:
+        template_label: Short label used in arc-history breadcrumbs
+            (e.g. ``"archive"``, ``"mark_read"``, ``"draft"``).
+        arc_name: Human-readable parent arc name (shown in UIs).
+        arc_goal: Parent arc goal.
+        script: Pre-verified EXECUTOR script body (from scripts.py).
+        state_seed: dict of arc-state keys to set on the EXECUTOR
+            before dispatch.  Must include all inputs the script
+            reads via ``dispatch(Label("state.get"), ...)``.
+        expected_account_email: mailbox the OAuth token is expected
+            to belong to.  Stored on the parent arc for audit and
+            re-pushed onto the EXECUTOR's state_seed if not already
+            present.
+        conversation_id: chat conversation that initiated the call
+            (or None for unsolicited).
+
+    Returns ``{"arc_id": <parent_id>}`` on success or
+    ``{"error": ...}`` on failure (parent arc is marked failed so the
+    audit trail still surfaces the attempt).
+    """
+    from carpenter.core.arcs import manager as _am
+    from carpenter.core.engine import work_queue as _wq
+    from carpenter.core.workflows._arc_state import set_arc_state
+    from carpenter.tool_backends import arc as arc_backend
+
+    parent_id = _am.create_arc(
+        name=arc_name,
+        goal=arc_goal,
+        agent_type="PLANNER",
+    )
+    if conversation_id:
+        from carpenter.agent import conversation as _conv
+        _conv.link_arc_to_conversation(conversation_id, parent_id)
+    _am.update_status(parent_id, "active")
+
+    batch_result = arc_backend.handle_create_batch({
+        "arcs": [
+            {
+                "name": f"Gmail {template_label}",
+                "goal": (
+                    "Submit this EXACT code via submit_code:\n"
+                    "```python\n" + script + "```\n"
+                    "Inputs are pre-seeded in arc state."
+                ),
+                "parent_id": parent_id,
+                "integrity_level": "untrusted",
+                "output_type": "json",
+                "agent_type": "EXECUTOR",
+                "step_order": 0,
+            },
+        ],
+    })
+    if "error" in batch_result:
+        try:
+            _am.update_status(parent_id, "failed")
+        except Exception:  # noqa: BLE001
+            pass
+        return {"error": batch_result["error"]}
+
+    executor_arc_id = batch_result["arc_ids"][0]
+
+    # Pre-seed all caller-supplied state keys.  We always include
+    # expected_account_email so the in-script check is enforceable.
+    seed = dict(state_seed)
+    seed.setdefault("expected_account_email", expected_account_email)
+    for key, value in seed.items():
+        set_arc_state(executor_arc_id, key, value)
+    set_arc_state(parent_id, "expected_account_email", expected_account_email)
+
+    if conversation_id:
+        from carpenter.agent import conversation as _conv
+        _conv.link_arc_to_conversation(conversation_id, executor_arc_id)
+
+    _wq.enqueue(
+        "arc.dispatch",
+        {"arc_id": executor_arc_id},
+        idempotency_key=f"arc_dispatch:{executor_arc_id}",
+    )
+    return {"arc_id": parent_id}
+
+
+@chat_tool(
+    description=(
+        "Archive a Gmail message (remove the INBOX label).  Idempotent: "
+        "archiving an already-archived message returns "
+        "{archived: true, was_already_archived: true}.  Trust shape "
+        "mirrors pkg_email_send_email — single untrusted EXECUTOR arc, "
+        "chat-boundary human confirm, in-script expected-account check.  "
+        "Allowlist is NOT consulted because no recipient surface exists; "
+        "this only mutates own-inbox state."
+    ),
+    input_schema={
+        "type": "object",
+        "properties": {
+            "provider_message_id": {
+                "type": "string",
+                "description": "Gmail message id (opaque string).",
+            },
+        },
+        "required": ["provider_message_id"],
+    },
+    capabilities=["arc_create", "external_effect"],
+    requires_user_confirm=True,
+)
+def pkg_email_archive_email(tool_input, **kwargs):
+    """Archive one Gmail message via an EXECUTOR arc."""
+    from .scripts import GMAIL_ARCHIVE_SCRIPT
+
+    mid = (tool_input.get("provider_message_id") or "").strip()
+    if not mid:
+        return json.dumps({"error": "provider_message_id is required"})
+
+    expected = _resolve_expected_account()
+    if not expected:
+        return json.dumps({
+            "error": (
+                "operator_email / GMAIL_OAUTH_ACCOUNT_EMAIL not "
+                "configured; cannot perform expected-account check.  "
+                "Run pkg_email_authorize first."
+            ),
+        })
+
+    result = _create_modify_arc(
+        template_label="archive",
+        arc_name=f"Email archive: {mid[:32]}",
+        arc_goal=(
+            "Archive a Gmail message (remove INBOX label) using the "
+            "pre-verified archive script.  The in-script "
+            "expected-account check guards against a swapped-in "
+            "refresh-token attack."
+        ),
+        script=GMAIL_ARCHIVE_SCRIPT,
+        state_seed={"provider_message_id": mid},
+        expected_account_email=expected,
+        conversation_id=kwargs.get("conversation_id"),
+    )
+    if "error" in result:
+        return json.dumps(result)
+    return json.dumps({
+        "arc_id": result["arc_id"],
+        "note": (
+            f"Archive queued (arc #{result['arc_id']}).  Result will "
+            "arrive via arc-completion notify; the response message "
+            "includes was_already_archived for idempotency phrasing."
+        ),
+    })
+
+
+@chat_tool(
+    description=(
+        "Mark a Gmail message as read (remove the UNREAD label).  "
+        "Idempotent: marking an already-read message returns "
+        "{marked_read: true, was_already_read: true}.  Trust shape "
+        "mirrors pkg_email_send_email — single untrusted EXECUTOR arc, "
+        "chat-boundary human confirm, in-script expected-account check."
+    ),
+    input_schema={
+        "type": "object",
+        "properties": {
+            "provider_message_id": {
+                "type": "string",
+                "description": "Gmail message id (opaque string).",
+            },
+        },
+        "required": ["provider_message_id"],
+    },
+    capabilities=["arc_create", "external_effect"],
+    requires_user_confirm=True,
+)
+def pkg_email_mark_read_email(tool_input, **kwargs):
+    """Mark one Gmail message as read via an EXECUTOR arc."""
+    from .scripts import GMAIL_MARK_READ_SCRIPT
+
+    mid = (tool_input.get("provider_message_id") or "").strip()
+    if not mid:
+        return json.dumps({"error": "provider_message_id is required"})
+
+    expected = _resolve_expected_account()
+    if not expected:
+        return json.dumps({
+            "error": (
+                "operator_email / GMAIL_OAUTH_ACCOUNT_EMAIL not "
+                "configured; cannot perform expected-account check.  "
+                "Run pkg_email_authorize first."
+            ),
+        })
+
+    result = _create_modify_arc(
+        template_label="mark_read",
+        arc_name=f"Email mark-read: {mid[:32]}",
+        arc_goal=(
+            "Mark a Gmail message as read (remove UNREAD label) using "
+            "the pre-verified mark-read script.  The in-script "
+            "expected-account check guards against a swapped-in "
+            "refresh-token attack."
+        ),
+        script=GMAIL_MARK_READ_SCRIPT,
+        state_seed={"provider_message_id": mid},
+        expected_account_email=expected,
+        conversation_id=kwargs.get("conversation_id"),
+    )
+    if "error" in result:
+        return json.dumps(result)
+    return json.dumps({
+        "arc_id": result["arc_id"],
+        "note": (
+            f"Mark-read queued (arc #{result['arc_id']}).  Result will "
+            "arrive via arc-completion notify; the response message "
+            "includes was_already_read for idempotency phrasing."
+        ),
+    })
+
+
+@chat_tool(
+    description=(
+        "Create a Gmail draft (the message is staged, NOT sent).  "
+        "Recipients are validated against SecurityPolicies.email at "
+        "draft-creation time — a draft with un-allowlisted recipients "
+        "would be a foothold for a later send-bypass and is refused "
+        "up-front.  Requires user confirmation at the chat boundary.  "
+        "Each call creates a NEW draft; there is no update-draft tool "
+        "in Phase 1.5 because sending a stale draft would bypass the "
+        "re-confirm on body content (send the draft by re-running "
+        "pkg_email_send_email with the same body)."
+    ),
+    input_schema={
+        "type": "object",
+        "properties": {
+            "to": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "Recipient email addresses.  Each must be in the "
+                    "SecurityPolicies.email allowlist (use "
+                    "pkg_email_trust_sender to add)."
+                ),
+            },
+            "subject": {"type": "string"},
+            "body": {"type": "string"},
+        },
+        "required": ["to", "subject", "body"],
+    },
+    capabilities=["arc_create", "external_effect"],
+    requires_user_confirm=True,
+)
+def pkg_email_draft_email(tool_input, **kwargs):
+    """Create a Gmail draft via an EXECUTOR arc."""
+    from carpenter.security import get_policies
+
+    from .scripts import GMAIL_DRAFT_SCRIPT
+
+    to_list = tool_input.get("to") or []
+    subject = (tool_input.get("subject") or "").strip()
+    body = tool_input.get("body") or ""
+
+    if not isinstance(to_list, list) or not to_list:
+        return json.dumps({"error": "to must be a non-empty list"})
+    if not subject:
+        return json.dumps({"error": "subject is required"})
+    if not body:
+        return json.dumps({"error": "body is required"})
+
+    # Mirror pkg_email_send_email: validate every recipient against the
+    # global allowlist BEFORE creating the arc.  Drafts with un-
+    # allowlisted addresses would be a foothold for a later
+    # send-bypass and are refused up-front.
+    pol = get_policies()
+    for addr in to_list:
+        if not pol.is_allowed("email", addr):
+            return json.dumps({
+                "error": (
+                    f"recipient {addr!r} is not in the email "
+                    f"allowlist; use pkg_email_trust_sender to add."
+                ),
+            })
+
+    expected = _resolve_expected_account()
+    if not expected:
+        return json.dumps({
+            "error": (
+                "operator_email / GMAIL_OAUTH_ACCOUNT_EMAIL not "
+                "configured; cannot perform expected-account check.  "
+                "Run pkg_email_authorize first."
+            ),
+        })
+
+    raw_b64 = _build_raw_message(
+        sender=expected, to=to_list, subject=subject, body=body,
+    )
+
+    result = _create_modify_arc(
+        template_label="draft",
+        arc_name=f"Email draft: {subject[:60]}",
+        arc_goal=(
+            "Create a Gmail draft using the pre-verified draft "
+            "script.  Recipients have been validated against "
+            "SecurityPolicies.email at the chat boundary; the "
+            "in-script expected-account check guards against a "
+            "swapped-in refresh-token attack."
+        ),
+        script=GMAIL_DRAFT_SCRIPT,
+        state_seed={"raw_message_b64": raw_b64},
+        expected_account_email=expected,
+        conversation_id=kwargs.get("conversation_id"),
+    )
+    if "error" in result:
+        return json.dumps(result)
+    return json.dumps({
+        "arc_id": result["arc_id"],
+        "note": (
+            f"Draft queued (arc #{result['arc_id']}).  Result will "
+            "arrive via arc-completion notify; the response message "
+            "includes the Gmail-assigned draft_id and "
+            "provider_message_id."
+        ),
+    })
