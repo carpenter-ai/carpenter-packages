@@ -1,12 +1,16 @@
 name: carpenter-email
-version: "0.1.0"
+version: "0.2.0"
 description: |
-  Email assistant package (Gmail API backend).  Phase 1: read inbox
-  messages through the D24 untrusted-data pipeline and send mail with
-  expected-account safety check.  Read-side ships three review
-  templates (simple text, meeting invite, order confirmation), each
-  with a REVIEWER + JUDGE pipeline that gates body content behind
-  deterministic policy checks before it can reach trusted context.
+  Email assistant package (Gmail API backend).  Phase 1 ships read
+  templates through the D24 untrusted-data pipeline and send mail
+  with expected-account safety check.  Phase 1.5 (this version) adds
+  three external-effect modify tools — pkg_email_archive_email,
+  pkg_email_mark_read_email, pkg_email_draft_email — each guarded by
+  a chat-boundary human-confirm and an in-script expected-account
+  check.  Read-side ships three review templates (simple text,
+  meeting invite, order confirmation), each with a REVIEWER + JUDGE
+  pipeline that gates body content behind deterministic policy
+  checks before it can reach trusted context.
 
 chat_tools:
   - tools.py
@@ -77,11 +81,23 @@ allowlist_proposals:
   - type: domain
     value: oauth2.googleapis.com
 
-# Gmail OAuth credential requirement.  Phase 1 needs gmail.readonly
-# (for list/search/read) and gmail.send (for send_email).  The
-# platform's generic OAuth-callback flow (carpenter/api/oauth.py)
-# handles the redirect-and-exchange round-trip and writes tokens
-# to the platform .env under the GMAIL_OAUTH_ prefix.
+# Gmail OAuth credential requirement.  Phase 1 needed gmail.readonly
+# (for list/search/read), gmail.send (for send_email), and
+# userinfo.email (for the expected-account check).  Phase 1.5 adds
+# gmail.modify (archive + mark-read use ``users.messages.modify``
+# with ``removeLabelIds``) and gmail.compose (for draft creation).
+#
+# Why five explicit scopes instead of collapsing to gmail.modify:
+# gmail.modify alone would grant delete-message authority.  We
+# deliberately want the narrower grant.  Five explicit scopes is the
+# audit-readable shape.
+#
+# Migration note for v0.1.0 users: Google supports incremental
+# authorisation, so re-running pkg_email_authorize once augments the
+# token's scope set without revoking existing grants.  The platform's
+# generic OAuth-callback flow (carpenter/api/oauth.py) handles the
+# redirect-and-exchange round-trip and writes tokens to the platform
+# .env under the GMAIL_OAUTH_ prefix.
 credential_requirements:
   - kind: oauth
     provider: google
@@ -91,4 +107,6 @@ credential_requirements:
     scopes:
       - https://www.googleapis.com/auth/gmail.readonly
       - https://www.googleapis.com/auth/gmail.send
+      - https://www.googleapis.com/auth/gmail.modify
+      - https://www.googleapis.com/auth/gmail.compose
       - https://www.googleapis.com/auth/userinfo.email

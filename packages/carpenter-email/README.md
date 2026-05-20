@@ -58,9 +58,11 @@ After install, the user must run `pkg_email_authorize` (a chat tool)
 to complete the Google OAuth round-trip.  The platform stores
 access/refresh tokens in `.env` under `GMAIL_OAUTH_*`.
 
-## Phase 1 vs later phases
+## Phase 1, 1.5, and later phases
 
-This Phase 1 package ships:
+This package (v0.2.0) ships Phase 1 + Phase 1.5:
+
+Phase 1:
 
 * Three read templates with REVIEWER + JUDGE.
 * `pkg_email_send_email` with chat-confirm + allowlist + expected-
@@ -69,10 +71,31 @@ This Phase 1 package ships:
   `pkg_email_untrust_sender`).
 * OAuth bootstrap (`pkg_email_authorize`).
 
+Phase 1.5 (v0.2.0):
+
+* `pkg_email_archive_email` — remove INBOX label, idempotent.
+* `pkg_email_mark_read_email` — remove UNREAD label, idempotent.
+* `pkg_email_draft_email` — create a Gmail draft, recipients
+  validated against the allowlist at draft-creation time.
+
+All three Phase 1.5 tools share `pkg_email_send_email`'s trust
+shape: single-arc untrusted EXECUTOR pipeline guarded by
+`requires_user_confirm=True` at the chat boundary and an in-script
+expected-account check.  They are external-effect operations, NOT
+U->T graduations, so there is no REVIEWER + JUDGE handler — the
+side-effect on Gmail IS the operation, and no untrusted bytes are
+promoted to trusted context.
+
+OAuth scopes: Phase 1.5 adds `gmail.modify` (archive + mark-read)
+and `gmail.compose` (draft) on top of Phase 1's `gmail.readonly` +
+`gmail.send` + `userinfo.email`.  See SETUP.md for the v0.1.0 ->
+v0.2.0 migration steps.
+
 Future phases (not in this package):
 
-* Phase 1.5: archive / mark_read / draft.
+* Phase 2: EmbeddingService + PackageVectorStore.
 * Phase 3: trigger subscriptions for inbound polling, IMAP backend
-  alternative.
+  alternative, attachment metadata surfacing.
+* Hypothetical 2.5: batch / thread modify operations.
 
 See the build plan in carpenter-core/docs (PR #310).

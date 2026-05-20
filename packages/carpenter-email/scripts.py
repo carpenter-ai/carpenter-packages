@@ -195,3 +195,271 @@ dispatch(Label("files.write"), {
 })
 dispatch(Label("resource.finalize"), {"resource_id": raw_resource_id})
 '''
+
+
+# Gmail archive script.
+#
+# The chat tool pre-seeds the EXECUTOR's arc state with:
+#   * provider_message_id     : str  (Gmail message id to archive)
+#   * expected_account_email  : str  (mailbox we expect to be acting on)
+#
+# "Archive" in Gmail terms means removing the INBOX label.  The script
+# first verifies the OAuth token's account email matches expected
+# (defence against a swapped-in refresh token), reads the message's
+# current labelIds to determine ``was_already_archived``, then POSTs
+# the modify request.  Idempotent: Gmail's modify endpoint accepts
+# ``removeLabelIds=["INBOX"]`` even when the label is already absent.
+GMAIL_ARCHIVE_SCRIPT = '''\
+from carpenter_tools.declarations import Label
+import os
+import json as _json
+
+mid_result = dispatch(Label("state.get"), {"key": Label("provider_message_id")})
+mid = mid_result[Label("value")]
+exp_result = dispatch(Label("state.get"), {"key": Label("expected_account_email")})
+expected = exp_result[Label("value")]
+
+access_token = os.environ.get("GMAIL_OAUTH_ACCESS_TOKEN", "")
+if not access_token:
+    raise RuntimeError(
+        "GMAIL_OAUTH_ACCESS_TOKEN not in environment; "
+        "run pkg_email_authorize first"
+    )
+
+# Step 1: verify token belongs to expected_account_email
+who = dispatch(Label("web.get"), {
+    "url": "https://www.googleapis.com/oauth2/v3/userinfo",
+    "headers": {"Authorization": "Bearer " + access_token},
+})
+who_status = who[Label("status_code")]
+if who_status != 200:
+    raise RuntimeError(
+        "userinfo lookup failed: status=" + str(who_status)
+    )
+who_body = _json.loads(who[Label("text")])
+actual = (who_body.get("email") or "").strip().lower()
+if actual != (expected or "").strip().lower():
+    raise RuntimeError(
+        "expected-account check failed: token belongs to "
+        + repr(actual) + ", briefing said " + repr(expected)
+    )
+
+# Step 2: read current labelIds to compute was_already_archived
+meta_url = (
+    "https://gmail.googleapis.com/gmail/v1/users/me/messages/"
+    + mid
+    + "?format=metadata"
+)
+meta = dispatch(Label("web.get"), {
+    "url": meta_url,
+    "headers": {"Authorization": "Bearer " + access_token},
+})
+meta_status = meta[Label("status_code")]
+if meta_status != 200:
+    raise RuntimeError(
+        "Gmail metadata GET failed: status=" + str(meta_status)
+    )
+meta_body = _json.loads(meta[Label("text")])
+current_labels = meta_body.get("labelIds") or []
+was_already_archived = "INBOX" not in current_labels
+
+# Step 3: modify (idempotent — removing a label that's not present is a no-op)
+modify_url = (
+    "https://gmail.googleapis.com/gmail/v1/users/me/messages/"
+    + mid
+    + "/modify"
+)
+modify_result = dispatch(Label("web.post"), {
+    "url": modify_url,
+    "headers": {
+        "Authorization": "Bearer " + access_token,
+        "Content-Type": "application/json",
+    },
+    "json_data": {"removeLabelIds": ["INBOX"]},
+})
+modify_status = modify_result[Label("status_code")]
+if modify_status not in (200, 202):
+    raise RuntimeError(
+        "Gmail modify failed: status=" + str(modify_status)
+        + " body=" + modify_result[Label("text")][:200]
+    )
+
+dispatch(Label("state.set"), {
+    "key": Label("_agent_response"),
+    "value": (
+        "Email archived (message_id=" + mid
+        + ", was_already_archived=" + str(was_already_archived) + ")."
+    ),
+})
+'''
+
+
+# Gmail mark-as-read script.
+#
+# The chat tool pre-seeds the EXECUTOR's arc state with:
+#   * provider_message_id     : str
+#   * expected_account_email  : str
+#
+# Mark-read removes the UNREAD label.  Same shape as the archive
+# script: expected-account check, read current labelIds to compute
+# was_already_read, then modify.
+GMAIL_MARK_READ_SCRIPT = '''\
+from carpenter_tools.declarations import Label
+import os
+import json as _json
+
+mid_result = dispatch(Label("state.get"), {"key": Label("provider_message_id")})
+mid = mid_result[Label("value")]
+exp_result = dispatch(Label("state.get"), {"key": Label("expected_account_email")})
+expected = exp_result[Label("value")]
+
+access_token = os.environ.get("GMAIL_OAUTH_ACCESS_TOKEN", "")
+if not access_token:
+    raise RuntimeError(
+        "GMAIL_OAUTH_ACCESS_TOKEN not in environment; "
+        "run pkg_email_authorize first"
+    )
+
+# Step 1: verify token belongs to expected_account_email
+who = dispatch(Label("web.get"), {
+    "url": "https://www.googleapis.com/oauth2/v3/userinfo",
+    "headers": {"Authorization": "Bearer " + access_token},
+})
+who_status = who[Label("status_code")]
+if who_status != 200:
+    raise RuntimeError(
+        "userinfo lookup failed: status=" + str(who_status)
+    )
+who_body = _json.loads(who[Label("text")])
+actual = (who_body.get("email") or "").strip().lower()
+if actual != (expected or "").strip().lower():
+    raise RuntimeError(
+        "expected-account check failed: token belongs to "
+        + repr(actual) + ", briefing said " + repr(expected)
+    )
+
+# Step 2: read current labelIds to compute was_already_read
+meta_url = (
+    "https://gmail.googleapis.com/gmail/v1/users/me/messages/"
+    + mid
+    + "?format=metadata"
+)
+meta = dispatch(Label("web.get"), {
+    "url": meta_url,
+    "headers": {"Authorization": "Bearer " + access_token},
+})
+meta_status = meta[Label("status_code")]
+if meta_status != 200:
+    raise RuntimeError(
+        "Gmail metadata GET failed: status=" + str(meta_status)
+    )
+meta_body = _json.loads(meta[Label("text")])
+current_labels = meta_body.get("labelIds") or []
+was_already_read = "UNREAD" not in current_labels
+
+# Step 3: modify
+modify_url = (
+    "https://gmail.googleapis.com/gmail/v1/users/me/messages/"
+    + mid
+    + "/modify"
+)
+modify_result = dispatch(Label("web.post"), {
+    "url": modify_url,
+    "headers": {
+        "Authorization": "Bearer " + access_token,
+        "Content-Type": "application/json",
+    },
+    "json_data": {"removeLabelIds": ["UNREAD"]},
+})
+modify_status = modify_result[Label("status_code")]
+if modify_status not in (200, 202):
+    raise RuntimeError(
+        "Gmail modify failed: status=" + str(modify_status)
+        + " body=" + modify_result[Label("text")][:200]
+    )
+
+dispatch(Label("state.set"), {
+    "key": Label("_agent_response"),
+    "value": (
+        "Email marked read (message_id=" + mid
+        + ", was_already_read=" + str(was_already_read) + ")."
+    ),
+})
+'''
+
+
+# Gmail draft-create script.
+#
+# The chat tool pre-seeds the EXECUTOR's arc state with:
+#   * raw_message_b64        : str  (RFC-822 raw message, base64url-encoded)
+#   * expected_account_email : str  (mailbox we expect to be drafting under)
+#
+# Each call creates a NEW draft.  There is no update-draft tool in
+# Phase 1.5 because sending a stale draft would bypass the chat-boundary
+# re-confirm on body content; updates would need to round-trip back
+# through pkg_email_send_email re-confirmation.  Returns the
+# Gmail-assigned draft_id and the provider_message_id of the staged
+# message via _agent_response so the chat agent can phrase correctly.
+GMAIL_DRAFT_SCRIPT = '''\
+from carpenter_tools.declarations import Label
+import os
+import json as _json
+
+raw_result = dispatch(Label("state.get"), {"key": Label("raw_message_b64")})
+raw_b64 = raw_result[Label("value")]
+exp_result = dispatch(Label("state.get"), {"key": Label("expected_account_email")})
+expected = exp_result[Label("value")]
+
+access_token = os.environ.get("GMAIL_OAUTH_ACCESS_TOKEN", "")
+if not access_token:
+    raise RuntimeError(
+        "GMAIL_OAUTH_ACCESS_TOKEN not in environment; "
+        "run pkg_email_authorize first"
+    )
+
+# Step 1: verify token belongs to expected_account_email
+who = dispatch(Label("web.get"), {
+    "url": "https://www.googleapis.com/oauth2/v3/userinfo",
+    "headers": {"Authorization": "Bearer " + access_token},
+})
+who_status = who[Label("status_code")]
+if who_status != 200:
+    raise RuntimeError(
+        "userinfo lookup failed: status=" + str(who_status)
+    )
+who_body = _json.loads(who[Label("text")])
+actual = (who_body.get("email") or "").strip().lower()
+if actual != (expected or "").strip().lower():
+    raise RuntimeError(
+        "expected-account check failed: token belongs to "
+        + repr(actual) + ", briefing said " + repr(expected)
+    )
+
+# Step 2: create the draft via gmail.users.drafts.create
+draft_result = dispatch(Label("web.post"), {
+    "url": "https://gmail.googleapis.com/gmail/v1/users/me/drafts",
+    "headers": {
+        "Authorization": "Bearer " + access_token,
+        "Content-Type": "application/json",
+    },
+    "json_data": {"message": {"raw": raw_b64}},
+})
+draft_status = draft_result[Label("status_code")]
+if draft_status not in (200, 202):
+    raise RuntimeError(
+        "Gmail draft create failed: status=" + str(draft_status)
+        + " body=" + draft_result[Label("text")][:200]
+    )
+draft_body = _json.loads(draft_result[Label("text")])
+draft_id = draft_body.get("id") or ""
+message = draft_body.get("message") or {}
+provider_message_id = message.get("id") or ""
+
+dispatch(Label("state.set"), {
+    "key": Label("_agent_response"),
+    "value": (
+        "Draft created (draft_id=" + draft_id
+        + ", provider_message_id=" + provider_message_id + ")."
+    ),
+})
+'''

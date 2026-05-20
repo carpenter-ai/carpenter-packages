@@ -7,7 +7,8 @@ the design / trust model, read [`README.md`](README.md) and the
 [build plan](https://rainbow-forge.duckdns.org:3000/ben-harack/carpenter-core/src/branch/main/docs/2026-05-06_carpenter-email-build-plan.md)
 in carpenter-core instead.
 
-Phase 1 (the version that's shipped) gives you four things:
+Phase 1 + 1.5 (the version that's shipped, v0.2.0) gives you these
+capabilities:
 
 - **Search and read** your inbox through a structured-extract pipeline
   that never lets raw email bodies into the chat agent's context.
@@ -15,14 +16,45 @@ Phase 1 (the version that's shipped) gives you four things:
   human-confirm prompt at the chat boundary, and an in-script check
   that the OAuth token actually belongs to the mailbox you think it
   does.
+- **Archive** and **mark messages read** (Phase 1.5) with the same
+  chat-confirm and expected-account safety as send. Both are
+  idempotent — re-archiving an archived message just reports
+  `was_already_archived: true`.
+- **Stage drafts** (Phase 1.5) with the same recipient-allowlist
+  check as send. Drafts are NOT sent automatically.
 - **Authorize** a Gmail account once via OAuth.
 - **Manage** the per-sender allowlist with `pkg_email_trust_sender`
   and `pkg_email_untrust_sender`.
 
-What it deliberately does **not** do in Phase 1: poll your inbox for
-new mail, read attachments, archive or mark messages read, save
-drafts. Those are scheduled for Phase 1.5 (archive/mark-read/draft)
-and Phase 3 (triggers and Pub/Sub).
+What it deliberately does **not** do: poll your inbox for new mail,
+read attachments, send a saved draft without re-confirming the body
+(by design — sending a stale draft would bypass the chat-boundary
+re-confirm), batch-modify multiple messages in a single call (the
+chat agent loops or fans out arcs instead). Inbox polling lands in
+Phase 3 (triggers and Pub/Sub); batch ops and attachments remain on
+the long-term roadmap.
+
+### Upgrading from v0.1.0
+
+If you already installed v0.1.0 and authorized a Gmail account,
+v0.2.0 adds two new OAuth scopes — `gmail.modify` (for archive +
+mark-read) and `gmail.compose` (for drafts). Google supports
+incremental authorisation, so the migration is:
+
+1. After upgrading the package, re-run `pkg_email_authorize` ONCE in
+   chat.
+2. The consent screen will list all five scopes — `gmail.readonly`,
+   `gmail.send`, `gmail.modify`, `gmail.compose`, `userinfo.email`.
+   **Grant all of them.** (Google's incremental-grant UX is a little
+   inconsistent — if it shows only a subset of scopes, click "Allow"
+   then re-run authorize once more; the authorize call passes
+   `include_granted_scopes=true` so the augmentation is
+   non-destructive.)
+3. The platform overwrites `GMAIL_OAUTH_ACCESS_TOKEN` /
+   `GMAIL_OAUTH_REFRESH_TOKEN` with the new wider-scoped token.
+
+No code changes are needed; the three new tools become usable as
+soon as authorize completes.
 
 ---
 
@@ -55,14 +87,21 @@ account, choose **External**. Fill in the app name (e.g. "My
 Carpenter"), your support email, and developer contact email. You can
 leave most other fields blank.
 
-On the **Scopes** screen, add three scopes:
+On the **Scopes** screen, add five scopes:
 
 - `https://www.googleapis.com/auth/gmail.readonly`
 - `https://www.googleapis.com/auth/gmail.send`
+- `https://www.googleapis.com/auth/gmail.modify`
+- `https://www.googleapis.com/auth/gmail.compose`
 - `https://www.googleapis.com/auth/userinfo.email`
 
-(The `userinfo.email` scope is what lets the send pipeline verify the
-OAuth token belongs to the mailbox you think it does — see §8 below.)
+The `userinfo.email` scope is what lets every external-effect tool
+(send, archive, mark-read, draft) verify the OAuth token belongs to
+the mailbox you think it does — see §8 below. `gmail.modify` is the
+narrowest standard Gmail scope that grants the `users.messages.modify`
+endpoint we need for archive + mark-read; `gmail.compose` is the
+draft-create endpoint. We deliberately do NOT request the wider
+`https://mail.google.com/` scope.
 
 On the **Test users** screen, add your own Gmail address as a test
 user. (You don't need to verify the app with Google as long as you're
@@ -106,7 +145,7 @@ agent calls the `install_package` tool internally:
 The agent will run `install_package(name="carpenter-email")` and
 should report something like:
 
-> **Agent:** "Installed carpenter-email v0.1.0. Two allowlist
+> **Agent:** "Installed carpenter-email v0.2.0. Two allowlist
 > entries (`gmail.googleapis.com`, `oauth2.googleapis.com`) need
 > your approval; I've queued them for you. Also need OAuth
 > credentials for Google — please paste the client_id / client_secret
@@ -122,10 +161,13 @@ Behind the scenes the platform's package installer reads
 2. Loads three arc templates (`email_read_simple_text`,
    `email_read_meeting_invite`, `email_read_order_confirmation`).
 3. Wires the three deterministic JUDGE handlers.
-4. Registers the seven chat tools (`pkg_email_authorize`,
-   `pkg_email_search_emails`, `pkg_email_list_inbox`,
-   `pkg_email_read_email`, `pkg_email_send_email`,
-   `pkg_email_trust_sender`, `pkg_email_untrust_sender`).
+4. Registers the ten chat tools — read side
+   (`pkg_email_authorize`, `pkg_email_search_emails`,
+   `pkg_email_list_inbox`, `pkg_email_read_email`),
+   write side (`pkg_email_send_email`, `pkg_email_archive_email`,
+   `pkg_email_mark_read_email`, `pkg_email_draft_email`),
+   and allowlist mutation (`pkg_email_trust_sender`,
+   `pkg_email_untrust_sender`).
 5. Seeds four KB articles under `email/*`.
 6. Presents two allowlist additions
    (`gmail.googleapis.com`, `oauth2.googleapis.com`) for your one-time
@@ -311,6 +353,91 @@ When all three pass, the EXECUTOR posts to
 success back through the arc-completion notify channel:
 
 > **Agent:** "Sent — Gmail accepted the message (status 200)."
+
+---
+
+## 6.5 First use — archive and mark-read (Phase 1.5)
+
+Once you've read a message you can archive it or mark it read without
+ever copying body content back into chat context.
+
+> **You:** "Archive the invoice I just read."
+
+The agent calls `pkg_email_archive_email(provider_message_id="...")`
+with the id it already has from the read pipeline. Three gates fire,
+mirroring send:
+
+1. **Chat-boundary human confirm.** Because
+   `pkg_email_archive_email` declares `requires_user_confirm=True`,
+   the agent shows you "Archive message id `...` from Gmail?" and
+   waits for your approval.
+2. **In-script expected-account check.** Inside the untrusted
+   EXECUTOR, the pre-verified archive script calls Google's
+   `userinfo` endpoint and verifies the OAuth token's actual mailbox
+   matches the configured `GMAIL_OAUTH_ACCOUNT_EMAIL`.
+3. **Idempotent modify.** Gmail's
+   `users.messages.modify` with `removeLabelIds=["INBOX"]` is a no-op
+   when the message is already archived. The script reads the
+   current `labelIds` first and reports `was_already_archived` so the
+   agent can phrase the result honestly.
+
+> **Agent:** "Archived (was_already_archived: false)."
+
+`pkg_email_mark_read_email` is structurally identical — same trust
+gates, same idempotency, just removes the `UNREAD` label instead.
+
+There is deliberately **no batch archive** or **batch mark-read**
+tool in Phase 1.5. For multi-message operations the chat agent
+loops, calling the tool once per message id. Each call has its own
+human-confirm prompt, which is the entire point — bulk-archive
+"please archive everything from acme.com" should be one explicit
+chain of approvals, not a single yes-to-200-messages.
+
+---
+
+## 6.6 First use — drafts (Phase 1.5)
+
+`pkg_email_draft_email` stages a message in your Gmail Drafts folder
+without sending it. It's the "I want to compose this carefully"
+escape hatch — useful when the chat agent should produce a first
+draft for you to edit by hand before sending.
+
+> **You:** "Draft a reply to Alice's invoice with our pre-approval
+> language."
+
+The agent calls
+`pkg_email_draft_email(to=["alice@example.com"], subject="...",
+body="...")`. Three gates fire:
+
+1. **In-tool allowlist check.** Recipients are validated against
+   `SecurityPolicies.email` BEFORE the arc is built. A draft with
+   un-allowlisted addresses would be a foothold for a later
+   send-bypass — refused up-front.
+2. **Chat-boundary human confirm.** You see the full draft (to,
+   subject, body) and approve.
+3. **In-script expected-account check.** Same as send.
+
+> **Agent:** "Draft created (draft_id: r-1234567, provider_message_id:
+> 184abc...). It's in your Drafts folder — open Gmail to edit or
+> send it."
+
+Important things drafts do NOT do in Phase 1.5:
+
+- **No update-draft tool.** If you want to revise a draft, ask the
+  agent to delete the old one in Gmail manually and create a new one.
+  We don't ship `pkg_email_update_draft` because the natural use case
+  (LLM tweaks a draft you already approved) would let body content
+  drift past the original chat-boundary confirm.
+- **No send-draft tool.** Once you're happy with a draft, send it by
+  re-running `pkg_email_send_email` with the same recipients /
+  subject / body. The chat-boundary confirm runs again on the body
+  the user actually approves at send time, not on whatever happens
+  to be in the Drafts folder. (You can also send the draft directly
+  from the Gmail web UI.)
+- **No idempotency.** Each call creates a NEW draft. If you
+  re-confirm twice you'll end up with two near-identical drafts. The
+  human-confirm requirement is the protection against accidental
+  double-create.
 
 ---
 
