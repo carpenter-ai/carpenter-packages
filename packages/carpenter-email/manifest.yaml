@@ -1,5 +1,5 @@
 name: carpenter-email
-version: "0.3.0"
+version: "0.4.0"
 description: |
   Email assistant package (Gmail API backend).  Phase 1 shipped read
   templates through the D24 untrusted-data pipeline and send mail
@@ -9,16 +9,23 @@ description: |
   a chat-boundary human-confirm and an in-script expected-account
   check.
 
-  Phase 1.5 v2 (this version, 0.3.0) makes ALL four write tools
-  (send, archive, mark-read, draft) go through the full untrusted-
-  data graduation pipeline: an EXECUTOR arc that POSTs to Gmail and
-  writes a small structured receipt as an untrusted Resource, a
-  REVIEWER arc with a static prompt that extracts a typed
-  EmailXxxResult dataclass, and a deterministic Python JUDGE that
-  bounds-checks every field before graduating the extract to
-  trusted state.  This closes the trust-invariant I3 hole in the
-  earlier modify shape (untrusted Gmail bytes flowing back into
-  chat context without ever passing JUDGE).
+  Phase 1.5 v2 (v0.3.0) makes ALL four write tools (send, archive,
+  mark-read, draft) go through the full untrusted-data graduation
+  pipeline: an EXECUTOR arc that POSTs to Gmail and writes a small
+  structured receipt as an untrusted Resource, a REVIEWER arc with a
+  static prompt that extracts a typed EmailXxxResult dataclass, and a
+  deterministic Python JUDGE that bounds-checks every field before
+  graduating the extract to trusted state.  This closes the
+  trust-invariant I3 hole in the earlier modify shape.
+
+  Phase 3a (this version, 0.4.0) introduces inbound polling: an
+  in-process GmailPollTrigger calls users.history.list every 15
+  minutes and emits one email.received event per newly-arrived
+  message.  The package's trigger_subscriptions fans each event into
+  a per-message email_triage arc tree (PLANNER -> EXECUTOR -> REVIEWER
+  -> JUDGE) which graduates one EmailTriageExtract (category +
+  sanitized subject + flags) to chat context.  No body or raw header
+  content ever leaves the JUDGE gate.
 
   Read-side ships three review templates (simple text, meeting
   invite, order confirmation), unchanged.
@@ -44,6 +51,7 @@ data_models:
   - EmailArchiveResult
   - EmailMarkReadResult
   - EmailDraftResult
+  - EmailTriageExtract
 
 # Seven templates total: three Phase 1 read templates plus four
 # Phase 1.5 v2 write templates.  All seven share the canonical
@@ -86,6 +94,11 @@ arc_templates:
     briefing_kind: EmailReviewBriefing
     extract_kind: EmailDraftResult
     judge_handler: judges:judge_email_draft
+  - name: email_triage
+    path: templates/email-triage/template.yaml
+    briefing_kind: EmailReviewBriefing
+    extract_kind: EmailTriageExtract
+    judge_handler: judges:judge_email_triage
 
 judge_handlers:
   - name: judge_simple_text
@@ -102,6 +115,8 @@ judge_handlers:
     module: judges
   - name: judge_email_draft
     module: judges
+  - name: judge_email_triage
+    module: judges
 
 # KB articles seeded into kb/email/* on install.
 kb_articles:
@@ -113,6 +128,28 @@ kb_articles:
     path: kb/trust-warning.md
   - slug: email/style
     path: kb/style.md
+  - slug: email/inbound-triage
+    path: kb/inbound-triage.md
+
+# Phase 3a: in-process trigger that polls Gmail history every 15
+# minutes and emits one email.received event per newly-arrived
+# message id.  The trigger does NOT fetch message bodies; that is
+# the triage arc's job.
+triggers:
+  - name: gmail-inbound-poll
+    type: gmail_poll
+    module: triggers/gmail_poll.py
+    enabled: true
+    config:
+      cadence_seconds: 900   # 15 minutes
+      event_type: email.received
+
+# Phase 3a: route each email.received event into a triage arc tree.
+# The handler is a thin shim that spawns the email_triage arc tree
+# (see carpenter_email.handlers.triage_inbound).
+trigger_subscriptions:
+  - event: email.received
+    handler: handlers.triage_inbound:handle_email_received
 
 # Phase 1 ships ZERO sender allowlist proposals.  The user populates
 # the email allowlist via pkg_email_trust_sender (chat tool), one
