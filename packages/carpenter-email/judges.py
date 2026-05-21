@@ -28,11 +28,16 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .data_models import (
+    EMAIL_INDEX_MAX_BATCH,
+    EMAIL_INDEX_PHASES,
     EMAIL_TRIAGE_CATEGORIES,
     EMAIL_TRIAGE_FLAGS,
     AttachmentMetadata,
     EmailArchiveResult,
     EmailDraftResult,
+    EmailIndexBatchReceipt,
+    EmailIndexFetchedBatch,
+    EmailIndexFetchedEntry,
     EmailMarkReadResult,
     EmailMeetingInviteExtract,
     EmailOrderConfirmationExtract,
@@ -839,4 +844,447 @@ def judge_email_draft(extract: Any) -> JudgeVerdict:
     )
     if err:
         return JudgeVerdict.reject(err)
+    return JudgeVerdict.approve()
+
+
+# ---------------------------------------------------------------------------
+# Phase 4: semantic resource index JUDGEs
+# ---------------------------------------------------------------------------
+#
+# Two new handlers, both deterministic Python (no I/O, no DB handle):
+#
+# * ``judge_email_index_fetched_batch`` — the per-tick metadata harvest
+#   that the trigger consumes on its NEXT tick.  Every field of every
+#   entry passes through ``_sanitize_index_metadata``; rejected
+#   entries are NOT mutated, the parent batch rejects.  This is
+#   strict because trust invariant I3 hinges on no hostile string
+#   smuggling into ``metadata_json`` at rest.
+#
+# * ``judge_email_index_batch`` — the per-tick audit receipt the
+#   trigger itself writes post-embed.  Counts and sample error
+#   bounds only; the receipt does not carry per-message data.
+#
+# The original D1 design from the Phase 4 plan was "no JUDGE on the
+# upsert path".  The revised D12 design keeps that property (the
+# embed_and_upsert call is in trusted context, post-JUDGE) AND adds
+# a per-batch metadata JUDGE here, which is strictly stronger.
+
+# Local Gmail-label regex.  System labels are uppercase ASCII (INBOX,
+# IMPORTANT, CATEGORY_PROMOTIONS, ...); user labels match Gmail's
+# internal ``Label_<n>`` form.  We reject anything else — labels
+# enter ``metadata_json`` at rest and any wild Unicode is a
+# potential display-spoof.
+_INDEX_SYSTEM_LABEL_RE = re.compile(r"^[A-Z][A-Z0-9_]{0,63}$")
+_INDEX_USER_LABEL_RE = re.compile(r"^Label_[0-9]{1,32}$")
+_INDEX_BATCH_ID_RE = re.compile(r"^[a-zA-Z0-9_-]{5,64}$")
+# Watermark strings stored in package_state are short opaque blobs
+# (typically a Gmail historyId / internalDate / message id).  Bound
+# the alphabet conservatively — these end up in trusted context via
+# the receipt and we want them to be obviously inert.
+_INDEX_WATERMARK_RE = re.compile(r"^[a-zA-Z0-9_:.-]{0,128}$")
+
+_MAX_INDEX_FROM_DISPLAY = 128
+_MAX_INDEX_SUBJECT = 256
+_MAX_INDEX_SNIPPET = 256
+_MAX_INDEX_BODY = 4000
+_MAX_INDEX_LABELS = 32
+_MAX_INDEX_LABEL_LEN = 64
+_MAX_INDEX_SAMPLE_ERROR = 512
+_MIN_INDEX_YEAR = 1990
+_MAX_INDEX_YEAR = 2100
+
+# Cheap inline email-address sanity check.  We deliberately avoid the
+# full EmailPolicy import here because the JUDGE handler runs in a
+# deterministic-Python context that should not touch the platform's
+# allowlist (the index is package-internal — sender addresses don't
+# need to be in the global allowlist to be indexable).  A bare-form
+# regex is the right level of strictness: it rejects newlines /
+# control chars / display-name leakage / multi-recipient strings, but
+# allows international TLDs and plus-addressing.
+_INDEX_EMAIL_RE = re.compile(
+    r"^[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,63}$",
+)
+
+# Allowed structured error tags on the fetched batch.  Empty string
+# means "normal batch".  Any other value rejects.
+_INDEX_ERROR_KINDS = frozenset({
+    "",
+    "model_identity_mismatch",
+    "history_expired",
+})
+
+
+def _check_index_string_field(
+    name: str, value: Any, *, max_len: int, allow_empty: bool,
+) -> str | None:
+    """Common sanitisation for the free-text fields in an entry.
+
+    Rejects (returns a reason) on:
+      * non-string type
+      * empty string when ``allow_empty=False``
+      * length above ``max_len``
+      * any control character (incl. NUL, CR, LF)
+      * any bidirectional-override codepoint
+        (see ``_BIDI_OVERRIDES`` at the top of this file)
+
+    No mutation — this is the Phase 3b shape (reject, do not rewrite).
+    """
+    if not isinstance(value, str):
+        return f"{name} is not a string: {type(value).__name__}"
+    if not value:
+        if allow_empty:
+            return None
+        return f"{name} is empty"
+    if len(value) > max_len:
+        return f"{name} exceeds {max_len} chars ({len(value)})"
+    if _has_control_chars(value):
+        return f"{name} contains control characters"
+    for c in value:
+        if c in _BIDI_OVERRIDES:
+            return f"{name} contains a bidirectional override codepoint"
+    return None
+
+
+def _check_index_date_iso(value: Any) -> str | None:
+    """Reject malformed ISO-8601 datetimes or out-of-range years.
+
+    Allowed range ``[1990, 2100]``.  An entry with an obviously bogus
+    date suggests either an exotic Gmail edge case (which we'd
+    rather skip than store) or a tampered header.
+    """
+    if not isinstance(value, str):
+        return f"date_iso is not a string: {type(value).__name__}"
+    if not value:
+        return "date_iso is empty"
+    if len(value) > 64:
+        return f"date_iso exceeds 64 chars ({len(value)})"
+    # ``datetime.fromisoformat`` in 3.11+ accepts trailing ``Z`` for UTC
+    # and full RFC-3339 offsets; in 3.10 ``Z`` would reject.  Normalise
+    # so the JUDGE behaves identically across Pythons the platform
+    # supports.
+    s = value
+    if s.endswith("Z"):
+        s = s[:-1] + "+00:00"
+    try:
+        from datetime import datetime as _dt
+        parsed = _dt.fromisoformat(s)
+    except (TypeError, ValueError):
+        return f"date_iso {value!r} is not parseable ISO-8601"
+    if parsed.year < _MIN_INDEX_YEAR or parsed.year > _MAX_INDEX_YEAR:
+        return (
+            f"date_iso year {parsed.year} is outside "
+            f"[{_MIN_INDEX_YEAR}, {_MAX_INDEX_YEAR}]"
+        )
+    return None
+
+
+def _check_index_label(value: Any) -> str | None:
+    """Reject any label not matching the system-or-user-label regex."""
+    if not isinstance(value, str):
+        return f"label is not a string: {type(value).__name__}"
+    if not value:
+        return "label is empty"
+    if len(value) > _MAX_INDEX_LABEL_LEN:
+        return (
+            f"label exceeds {_MAX_INDEX_LABEL_LEN} chars ({len(value)})"
+        )
+    if (
+        not _INDEX_SYSTEM_LABEL_RE.match(value)
+        and not _INDEX_USER_LABEL_RE.match(value)
+    ):
+        return f"label {value!r} is neither a system nor user label form"
+    return None
+
+
+def _sanitize_index_metadata(entry: Any) -> str | None:
+    """Return ``None`` if ``entry`` is a valid EmailIndexFetchedEntry.
+
+    The shape mirrors :func:`_check_attachment_metadata`: reject-only,
+    no mutation, no fall-through silent rewrites.  Rejected entries
+    do not graduate; the parent batch tracks them via ``skipped_count``
+    rather than storing partial bogus metadata.
+
+    Order of checks is roughly cheapest-first so the common case
+    (well-formed entry) runs quickly.
+    """
+    if not isinstance(entry, EmailIndexFetchedEntry):
+        return (
+            f"entry is not EmailIndexFetchedEntry: {type(entry).__name__}"
+        )
+    if entry.schema_version != _SCHEMA_VERSION:
+        return (
+            f"entry schema_version {entry.schema_version!r} "
+            f"(expected {_SCHEMA_VERSION!r})"
+        )
+    # provider_message_id + thread_id — same shape as the existing
+    # Gmail-provider-id regex.
+    err = _check_provider_message_id(entry.provider_message_id)
+    if err:
+        return err
+    if not isinstance(entry.thread_id, str):
+        return f"thread_id is not a string: {type(entry.thread_id).__name__}"
+    if not _PROVIDER_ID_RE.match(entry.thread_id):
+        return (
+            f"thread_id {entry.thread_id!r} does not match expected "
+            f"shape ^[a-zA-Z0-9_-]{{5,50}}$"
+        )
+    # from_address — bare-form email, no display name, no commas.
+    fa = entry.from_address
+    if not isinstance(fa, str):
+        return f"from_address is not a string: {type(fa).__name__}"
+    if not fa:
+        return "from_address is empty"
+    if len(fa) > 254:
+        return f"from_address exceeds 254 chars ({len(fa)})"
+    if _has_control_chars(fa):
+        return "from_address contains control characters"
+    if fa != fa.lower():
+        return "from_address is not lowercase"
+    if not _INDEX_EMAIL_RE.match(fa):
+        return f"from_address {fa!r} does not match expected email shape"
+    # Display name (may be empty).
+    err = _check_index_string_field(
+        "from_display_clean", entry.from_display_clean,
+        max_len=_MAX_INDEX_FROM_DISPLAY, allow_empty=True,
+    )
+    if err:
+        return err
+    # Date.
+    err = _check_index_date_iso(entry.date_iso)
+    if err:
+        return err
+    # Subject + snippet + body (each may be empty).
+    err = _check_index_string_field(
+        "subject_raw", entry.subject_raw,
+        max_len=_MAX_INDEX_SUBJECT, allow_empty=True,
+    )
+    if err:
+        return err
+    err = _check_index_string_field(
+        "gmail_snippet", entry.gmail_snippet,
+        max_len=_MAX_INDEX_SNIPPET, allow_empty=True,
+    )
+    if err:
+        return err
+    err = _check_index_string_field(
+        "body_text_or_null", entry.body_text_or_null,
+        max_len=_MAX_INDEX_BODY, allow_empty=True,
+    )
+    if err:
+        return err
+    # has_attachment.  Bool is a subclass of int, so be explicit.
+    if not isinstance(entry.has_attachment, bool):
+        return (
+            f"has_attachment is not a bool: "
+            f"{type(entry.has_attachment).__name__}"
+        )
+    # Labels.
+    if not isinstance(entry.labels, tuple):
+        return f"labels is not a tuple: {type(entry.labels).__name__}"
+    if len(entry.labels) > _MAX_INDEX_LABELS:
+        return (
+            f"labels has {len(entry.labels)} entries "
+            f"(max {_MAX_INDEX_LABELS})"
+        )
+    seen_labels: set[str] = set()
+    for i, lab in enumerate(entry.labels):
+        err = _check_index_label(lab)
+        if err:
+            return f"labels[{i}]: {err}"
+        if lab in seen_labels:
+            return f"labels[{i}]: duplicate label {lab!r}"
+        seen_labels.add(lab)
+    return None
+
+
+def judge_email_index_fetched_batch(extract: Any) -> JudgeVerdict:
+    """JUDGE for ``email_index_phase1`` / ``_phase2`` / ``_incremental``.
+
+    Approves only if EVERY entry passes :func:`_sanitize_index_metadata`
+    AND the batch envelope (phase, batch_id, watermark shapes,
+    fetched/skipped/error_kind invariants) is well-formed.  Rejects
+    the whole batch on any per-entry failure — the trigger does not
+    consume partial batches.
+    """
+    if not isinstance(extract, EmailIndexFetchedBatch):
+        return JudgeVerdict.reject(
+            f"expected EmailIndexFetchedBatch, got {type(extract).__name__}",
+        )
+    if extract.schema_version != _SCHEMA_VERSION:
+        return JudgeVerdict.reject(
+            f"schema_version {extract.schema_version!r} "
+            f"(expected {_SCHEMA_VERSION!r})",
+        )
+    if extract.phase not in EMAIL_INDEX_PHASES:
+        return JudgeVerdict.reject(
+            f"phase {extract.phase!r} is not in the closed enum "
+            f"{sorted(EMAIL_INDEX_PHASES)}",
+        )
+    if not isinstance(extract.batch_id, str):
+        return JudgeVerdict.reject(
+            f"batch_id is not a string: {type(extract.batch_id).__name__}",
+        )
+    if not _INDEX_BATCH_ID_RE.match(extract.batch_id):
+        return JudgeVerdict.reject(
+            f"batch_id {extract.batch_id!r} does not match expected "
+            f"shape ^[a-zA-Z0-9_-]{{5,64}}$",
+        )
+    for fld_name, val in (
+        ("watermark_before", extract.watermark_before),
+        ("watermark_after", extract.watermark_after),
+    ):
+        if not isinstance(val, str):
+            return JudgeVerdict.reject(
+                f"{fld_name} is not a string: {type(val).__name__}",
+            )
+        if not _INDEX_WATERMARK_RE.match(val):
+            return JudgeVerdict.reject(
+                f"{fld_name} {val!r} does not match expected shape "
+                f"^[a-zA-Z0-9_:.-]{{0,128}}$",
+            )
+    # error_kind: closed enum.
+    if extract.error_kind not in _INDEX_ERROR_KINDS:
+        return JudgeVerdict.reject(
+            f"error_kind {extract.error_kind!r} is not in the closed enum "
+            f"{sorted(_INDEX_ERROR_KINDS)}",
+        )
+    # Counts.
+    for fld_name, val in (
+        ("fetched_count", extract.fetched_count),
+        ("skipped_count", extract.skipped_count),
+    ):
+        if isinstance(val, bool) or not isinstance(val, int):
+            return JudgeVerdict.reject(
+                f"{fld_name} is not an int: {type(val).__name__}",
+            )
+        if val < 0:
+            return JudgeVerdict.reject(f"{fld_name} is negative ({val})")
+        if val > EMAIL_INDEX_MAX_BATCH:
+            return JudgeVerdict.reject(
+                f"{fld_name} {val} exceeds cap {EMAIL_INDEX_MAX_BATCH}",
+            )
+    # Entries.
+    if not isinstance(extract.entries, tuple):
+        return JudgeVerdict.reject(
+            f"entries is not a tuple: {type(extract.entries).__name__}",
+        )
+    if len(extract.entries) > EMAIL_INDEX_MAX_BATCH:
+        return JudgeVerdict.reject(
+            f"entries has {len(extract.entries)} entries "
+            f"(max {EMAIL_INDEX_MAX_BATCH})",
+        )
+    # error_kind special case: if non-empty, the batch is a "pause
+    # marker" and entries MUST be empty (the trigger will surface the
+    # error rather than consume partial data).
+    if extract.error_kind and extract.entries:
+        return JudgeVerdict.reject(
+            f"error_kind {extract.error_kind!r} requires empty entries, "
+            f"got {len(extract.entries)}",
+        )
+    # Invariant: fetched = embedded + skipped (where embedded ~= len(entries)).
+    if len(extract.entries) + extract.skipped_count != extract.fetched_count:
+        return JudgeVerdict.reject(
+            f"count invariant: len(entries)={len(extract.entries)} + "
+            f"skipped_count={extract.skipped_count} != "
+            f"fetched_count={extract.fetched_count}",
+        )
+    seen_ids: set[str] = set()
+    for i, entry in enumerate(extract.entries):
+        err = _sanitize_index_metadata(entry)
+        if err:
+            return JudgeVerdict.reject(f"entries[{i}]: {err}")
+        if entry.provider_message_id in seen_ids:
+            return JudgeVerdict.reject(
+                f"entries[{i}]: duplicate provider_message_id "
+                f"{entry.provider_message_id!r}",
+            )
+        seen_ids.add(entry.provider_message_id)
+    return JudgeVerdict.approve()
+
+
+def judge_email_index_batch(extract: Any) -> JudgeVerdict:
+    """JUDGE for the per-tick :class:`EmailIndexBatchReceipt`.
+
+    The receipt is constructed in trusted context by the trigger
+    after embed-and-upsert has happened.  Approves only when counts
+    are inside the absolute batch cap, watermark shapes are sane,
+    and the sample error message (if any) is bounded and
+    control-free.
+    """
+    if not isinstance(extract, EmailIndexBatchReceipt):
+        return JudgeVerdict.reject(
+            f"expected EmailIndexBatchReceipt, got {type(extract).__name__}",
+        )
+    if extract.schema_version != _SCHEMA_VERSION:
+        return JudgeVerdict.reject(
+            f"schema_version {extract.schema_version!r} "
+            f"(expected {_SCHEMA_VERSION!r})",
+        )
+    if extract.phase not in EMAIL_INDEX_PHASES:
+        return JudgeVerdict.reject(
+            f"phase {extract.phase!r} is not in the closed enum "
+            f"{sorted(EMAIL_INDEX_PHASES)}",
+        )
+    if not isinstance(extract.batch_id, str):
+        return JudgeVerdict.reject(
+            f"batch_id is not a string: {type(extract.batch_id).__name__}",
+        )
+    if not _INDEX_BATCH_ID_RE.match(extract.batch_id):
+        return JudgeVerdict.reject(
+            f"batch_id {extract.batch_id!r} does not match expected "
+            f"shape ^[a-zA-Z0-9_-]{{5,64}}$",
+        )
+    for fld_name, val in (
+        ("watermark_before", extract.watermark_before),
+        ("watermark_after", extract.watermark_after),
+    ):
+        if not isinstance(val, str):
+            return JudgeVerdict.reject(
+                f"{fld_name} is not a string: {type(val).__name__}",
+            )
+        if not _INDEX_WATERMARK_RE.match(val):
+            return JudgeVerdict.reject(
+                f"{fld_name} {val!r} does not match expected shape "
+                f"^[a-zA-Z0-9_:.-]{{0,128}}$",
+            )
+    # Counts.
+    for fld_name, val in (
+        ("embedded_count", extract.embedded_count),
+        ("error_count", extract.error_count),
+    ):
+        if isinstance(val, bool) or not isinstance(val, int):
+            return JudgeVerdict.reject(
+                f"{fld_name} is not an int: {type(val).__name__}",
+            )
+        if val < 0:
+            return JudgeVerdict.reject(f"{fld_name} is negative ({val})")
+        if val > EMAIL_INDEX_MAX_BATCH:
+            return JudgeVerdict.reject(
+                f"{fld_name} {val} exceeds cap {EMAIL_INDEX_MAX_BATCH}",
+            )
+    if extract.embedded_count + extract.error_count > EMAIL_INDEX_MAX_BATCH:
+        return JudgeVerdict.reject(
+            f"embedded_count + error_count "
+            f"({extract.embedded_count + extract.error_count}) exceeds "
+            f"cap {EMAIL_INDEX_MAX_BATCH}",
+        )
+    # Sample error.
+    sem = extract.sample_error_message
+    if not isinstance(sem, str):
+        return JudgeVerdict.reject(
+            f"sample_error_message is not a string: {type(sem).__name__}",
+        )
+    if len(sem) > _MAX_INDEX_SAMPLE_ERROR:
+        return JudgeVerdict.reject(
+            f"sample_error_message exceeds {_MAX_INDEX_SAMPLE_ERROR} "
+            f"chars ({len(sem)})",
+        )
+    if _has_control_chars(sem):
+        return JudgeVerdict.reject(
+            "sample_error_message contains control characters",
+        )
+    if extract.error_count == 0 and sem:
+        return JudgeVerdict.reject(
+            "sample_error_message must be empty when error_count is 0",
+        )
     return JudgeVerdict.approve()

@@ -1,0 +1,43 @@
+You are extracting a structured batch of newly-arrived Gmail message
+metadata for the carpenter-email semantic resource index
+(Incremental phase).
+
+CONTEXT
+-------
+Inputs are provided as Resources you may read:
+  - briefing: an EmailReviewBriefing dataclass (born trusted).
+  - raw_fetch: a JSON document the EXECUTOR script wrote.  Untrusted.
+
+The raw_fetch JSON has the same shape as Phase 1 (see Phase 1
+reviewer.txt for the full schema) with these differences:
+  * raw_fetch.phase == "incremental".
+  * raw_fetch.watermark_before / watermark_after are Gmail historyId
+    strings (not internalDate strings).
+  * raw_fetch.error_kind may also be "history_expired" — Gmail
+    expired the watermark (>7 days stale).  When this occurs the
+    EXECUTOR returns ``entries=[]`` and the trigger re-routes to
+    Phase 1 backfill.
+
+OUTPUT
+------
+Emit exactly ONE EmailIndexFetchedBatch dataclass via derive_resource.
+
+Field mapping is IDENTICAL to Phase 1 with these incremental-specific
+points:
+
+  - phase: must be exactly "incremental".  REFUSE otherwise.
+  - error_kind: copy verbatim.  Must be in
+    {"", "model_identity_mismatch", "history_expired"}.  REFUSE on
+    anything else.
+  - When error_kind is non-empty, entries MUST be empty and
+    fetched_count + skipped_count MUST both be 0.
+
+All other fields, all sanitisation, all rejection criteria are the
+same as Phase 1.
+
+RULES (security-critical)
+-------------------------
+1. Same security rules as Phase 1.  Re-read them before deriving.
+2. raw_fetch.expected_account_email MUST equal
+   briefing.expected_account_email.
+3. After deriving the extract Resource, your work is done — exit.

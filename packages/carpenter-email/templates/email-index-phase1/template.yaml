@@ -1,0 +1,60 @@
+name: email_index_phase1
+description: |
+  Phase 1 of the carpenter-email semantic resource index (Phase 4 PR-A).
+  Backfills the email vector index by walking Gmail messages in
+  descending ``internalDate`` order in batches of <=100.
+
+  This is a trigger-spawned pipeline (no chat boundary): the
+  ``email_index_phase1`` PollableTrigger fires on a 60-second cadence
+  and creates one of these arc trees per tick.  The trigger consumes
+  the JUDGE-approved ``EmailIndexFetchedBatch`` and performs embed +
+  upsert + watermark CAS in trusted context AFTER the JUDGE verdict —
+  no embedding or vector write happens inside an untrusted arc.
+
+  Pipeline shape mirrors every other carpenter-email template:
+  PLANNER -> EXECUTOR (untrusted; pre-verified Gmail fetch script) ->
+  REVIEWER (static prompt; no KB; only derive_resource) -> JUDGE
+  (deterministic Python).
+steps:
+  - name: prepare-briefing
+    description: |
+      Construct EmailReviewBriefing from the SecurityPolicies.email
+      allowlist snapshot and the static suspicious-keyword list, then
+      derive_resource it as born-trusted.  Trusted PLANNER context.
+    order: 0
+    agent_type: PLANNER
+    model_policy: fast-chat
+  - name: fetch-batch
+    description: |
+      Untrusted EXECUTOR step.  Submits the pre-verified Phase 1 Gmail
+      fetch script (carpenter_email.scripts.GMAIL_INDEX_PHASE1_SCRIPT)
+      verbatim via submit_code.  The script reads watermark / max_batch
+      from arc state, lists message ids via gmail.users.messages.list,
+      fetches per-message metadata via gmail.users.messages.get
+      (format=metadata), and writes the result JSON to the raw
+      Resource on disk.  No KB access; egress restricted to
+      gmail.googleapis.com / oauth2.googleapis.com.
+    order: 1
+    agent_type: EXECUTOR
+    integrity_level: untrusted
+    model_policy: background-batch
+  - name: review-batch
+    description: |
+      Constrained REVIEWER step with a static prompt shipped from the
+      package (reviewer.txt).  Reads briefing + raw fetch JSON; writes
+      one pending EmailIndexFetchedBatch Resource via derive_resource.
+      No KB access (defence-in-depth against prompt injection).
+    order: 2
+    agent_type: REVIEWER
+    model_policy: careful-coding
+    arc_role: verifier
+  - name: judge-batch
+    description: |
+      Deterministic JUDGE step — handled by the platform's
+      ``_try_package_judge`` dispatch, which loads the batch Resource
+      bytes, deserialises into EmailIndexFetchedBatch, and calls
+      ``judges:judge_email_index_fetched_batch``.  On approve the
+      trigger's next tick will pick up the graduated extract and
+      perform embed + upsert + watermark CAS.  No AI agent.
+    order: 3
+    agent_type: JUDGE

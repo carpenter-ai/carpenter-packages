@@ -555,3 +555,187 @@ class EmailTriageExtract:
     importance_flags: tuple[str, ...] = ()
     attachments: tuple["AttachmentMetadata", ...] = ()
     schema_version: str = "1.0"
+
+
+# ---------------------------------------------------------------------------
+# Phase 4: semantic resource index dataclasses
+# ---------------------------------------------------------------------------
+#
+# Two new kinds power the email package's per-message semantic index:
+#
+# * ``EmailIndexFetchedBatch`` — the **per-tick metadata harvest**.
+#   The EXECUTOR fetches a page of Gmail messages and writes one
+#   receipt JSON; the REVIEWER copies each message's metadata fields
+#   into a tuple of ``EmailIndexFetchedEntry`` rows; the JUDGE
+#   (``judge_email_index_fetched_batch``) sanitises every field per
+#   :func:`judges._sanitize_index_metadata`.  The trigger consumes
+#   the graduated extract on its NEXT tick and calls
+#   ``package_vectors.embed_and_upsert`` for each entry IN TRUSTED
+#   CONTEXT.  The vector floats are therefore computed AFTER the
+#   JUDGE has bounded every metadata field, and the embed call
+#   never sees raw Gmail strings.  Trust invariant I3 is closed
+#   twice over: metadata sanitisation prevents any hostile string
+#   from landing in ``metadata_json`` at rest, and the post-JUDGE
+#   embed step keeps the embedding service off the untrusted path.
+#
+# * ``EmailIndexBatchReceipt`` — the **per-tick audit trail** the
+#   trigger writes (in trusted context, post-embed-and-upsert) so
+#   the chat agent can phrase "indexed 4521 emails today, 12 errors".
+#   JUDGE-bound counts and watermark monotonicity.
+#
+# Vector float values are never serialised into either dataclass.
+# Per the package-internal invariant E1 noted in the trust audit, no
+# trusted-context string carries vector data.
+
+
+# Phase enum kept as a module-level constant so judges.py and the
+# triggers can re-use it.  The literal values mirror the trigger names
+# and arc template names ("1" / "2" / "incremental").
+EMAIL_INDEX_PHASES = ("1", "2", "incremental")
+
+
+# Hard upper bound on entries in a single batch.  Phase 1's nominal
+# cap is 100; Phase 2 is 50; incremental is 25.  The JUDGE refuses
+# anything above 100 because a hostile REVIEWER smuggling extra
+# entries is exactly what this gate catches.
+EMAIL_INDEX_MAX_BATCH = 100
+
+
+@dataclass(frozen=True)
+class EmailIndexFetchedEntry:
+    """One message's worth of JUDGE-validated metadata.
+
+    The REVIEWER copies these fields from the Gmail message payload
+    after running them through ``_sanitize_index_metadata``; the
+    JUDGE re-runs the same sanitiser and refuses to graduate any
+    entry that fails.  Rejected entries are dropped from the batch
+    (the message is skipped this tick; counted in ``skipped_count``
+    on the parent batch).
+
+    Attributes:
+        provider_message_id: Opaque Gmail message id, bounded by
+            ``^[a-zA-Z0-9_-]{5,50}$``.
+        thread_id: Opaque Gmail thread id, same shape.
+        from_address: Lowercase bare-address sender; rejected if it
+            does not match the EmailPolicy address shape.
+        from_display_clean: Sender display-name component with
+            control chars, NUL, and bidi-override codepoints
+            rejected.  Bounded <=128 chars.  May be empty.
+        date_iso: ISO-8601 datetime parsed via
+            ``datetime.fromisoformat`` with year in ``[1990, 2100]``.
+        subject_raw: Sender-claimed Subject header.  Same
+            sanitisation as ``from_display_clean``; bounded
+            <=256 chars.  May be empty.
+        gmail_snippet: Gmail's ~200-char preview field.  Same
+            sanitisation; bounded <=256 chars.  May be empty.
+        body_text_or_null: Phase-2 body harvest (empty for Phase 1
+            and incremental).  Same sanitisation; bounded
+            <=4000 chars.
+        has_attachment: Boolean hint copied from Gmail's labelIds /
+            payload walk.
+        labels: Tuple of Gmail label strings (system labels like
+            ``INBOX``/``IMPORTANT`` or user labels ``Label_<n>``).
+            Bounded <=32 entries; each entry <=64 chars and matches
+            the per-label regex.
+        schema_version: ``"1.0"``.
+    """
+
+    provider_message_id: str = ""
+    thread_id: str = ""
+    from_address: str = ""
+    from_display_clean: str = ""
+    date_iso: str = ""
+    subject_raw: str = ""
+    gmail_snippet: str = ""
+    body_text_or_null: str = ""
+    has_attachment: bool = False
+    labels: tuple[str, ...] = ()
+    schema_version: str = "1.0"
+
+
+@dataclass(frozen=True)
+class EmailIndexFetchedBatch:
+    """One indexer-tick's JUDGE-validated metadata entries.
+
+    Produced by the REVIEWER (after reading the EXECUTOR's fetch
+    receipt) and graduated by ``judge_email_index_fetched_batch``.
+    The trigger reads this graduated extract on its next tick and
+    embeds + upserts every entry in trusted context.
+
+    Attributes:
+        phase: One of :data:`EMAIL_INDEX_PHASES`.  Determines which
+            embed-text composition the trigger uses.
+        batch_id: REVIEWER-assigned opaque ``^[a-zA-Z0-9_-]{5,64}$``
+            id, typically derived from the tick start time.  Log
+            correlation only; no security surface.
+        watermark_before: Opaque watermark snapshot the EXECUTOR
+            read from ``package_state`` at fetch time.
+        watermark_after: Opaque watermark snapshot the trigger will
+            persist after embedding succeeds.  The JUDGE does NOT
+            cross-check this against ``watermark_before`` for
+            monotonicity — each phase has its own ordering rule
+            and the trigger enforces it via CAS at write time.
+        entries: Tuple of :class:`EmailIndexFetchedEntry`, length
+            bounded by :data:`EMAIL_INDEX_MAX_BATCH`.
+        fetched_count: How many messages the EXECUTOR fetched
+            before any REVIEWER filtering.
+        skipped_count: How many messages the REVIEWER rejected
+            in-pass (e.g. obviously malformed envelope).  Bounded
+            ``[0, fetched_count]``; JUDGE checks
+            ``len(entries) + skipped_count == fetched_count``.
+        error_kind: Optional structured-error tag.  Empty for a
+            normal batch.  ``"model_identity_mismatch"`` is the
+            D13 #2 special case — JUDGE allows graduating with
+            empty ``entries`` so the trigger can pause indexing
+            and the chat agent can surface a user-actionable alert.
+        schema_version: ``"1.0"``.
+    """
+
+    phase: str = ""
+    batch_id: str = ""
+    watermark_before: str = ""
+    watermark_after: str = ""
+    entries: tuple[EmailIndexFetchedEntry, ...] = ()
+    fetched_count: int = 0
+    skipped_count: int = 0
+    error_kind: str = ""
+    schema_version: str = "1.0"
+
+
+@dataclass(frozen=True)
+class EmailIndexBatchReceipt:
+    """Per-tick audit receipt the trigger writes post-embed-and-upsert.
+
+    Constructed by the trigger in trusted context after every entry
+    from the JUDGE-validated :class:`EmailIndexFetchedBatch` has
+    been embedded + upserted (or skipped due to a per-entry embed
+    error).  The chat agent reads this so it can phrase the
+    indexing progress honestly.
+
+    Attributes:
+        phase: One of :data:`EMAIL_INDEX_PHASES`.
+        batch_id: Mirrors the upstream batch's id.
+        watermark_before: Mirrors the upstream batch's
+            ``watermark_before``.
+        watermark_after: Mirrors the upstream batch's
+            ``watermark_after``.
+        embedded_count: Vectors successfully upserted this tick.
+            ``[0, EMAIL_INDEX_MAX_BATCH]``.
+        error_count: Entries that failed embed/upsert (model-identity
+            mismatch, transient embedding service error, etc.).
+            ``[0, EMAIL_INDEX_MAX_BATCH]``.  ``embedded_count +
+            error_count <= EMAIL_INDEX_MAX_BATCH``.
+        sample_error_message: One-line, <=512 char, control-char-free
+            summary of the most recent embed error.  Empty when
+            ``error_count == 0``.  Display-only.
+        schema_version: ``"1.0"``.
+    """
+
+    phase: str = ""
+    batch_id: str = ""
+    watermark_before: str = ""
+    watermark_after: str = ""
+    embedded_count: int = 0
+    error_count: int = 0
+    sample_error_message: str = ""
+    schema_version: str = "1.0"
