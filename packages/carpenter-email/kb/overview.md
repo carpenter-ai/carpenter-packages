@@ -72,6 +72,22 @@ is reviewed independently with no thread-level trust caching (T10).
   email allowlist one entry at a time via `pkg_email_trust_sender`,
   defending against the accumulation-attack threat (T9).
 
+## Phase 4 (v0.6.0): semantic resource index
+
+The package now maintains a per-package vector index over your
+mailbox so `pkg_email_search_emails` can answer natural-language
+queries without a Gmail API round-trip.  Three PollableTriggers
+(60s cadence) backfill the mailbox in descending `internalDate`
+order, re-index pre-seeded message-id lists, and pick up newly-
+arrived mail via Gmail's `history.list`.  All embedding + upsert
+happens in trusted post-JUDGE context — the EXECUTOR never touches
+the vector store.
+
+See `kb/email/index.md` for the trust contract and operator
+controls (`pkg_email_reindex`, `pkg_email_reindex_pause`,
+`pkg_email_reindex_resume`).  See `kb/email/search.md` for the
+vector-or-keyword backend selection rules.
+
 ## Reading more
 
 * `kb/email/policy-setup.md` — how the allowlist works in practice.
@@ -79,3 +95,5 @@ is reviewed independently with no thread-level trust caching (T10).
   handling email-derived information safely.
 * `kb/email/style.md` — the user's preferred email-writing style for
   outbound composition.
+* `kb/email/index.md` — the Phase 4 semantic resource index.
+* `kb/email/search.md` — vector-or-keyword search backend selection.

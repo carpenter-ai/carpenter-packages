@@ -770,14 +770,91 @@ def _create_search_executor(
     return {"arc_id": parent_id}
 
 
+def _index_status_snapshot() -> dict:
+    """Return a small structured snapshot of the indexer's progress
+    for inclusion in pkg_email_search_emails responses.
+
+    The chat agent surfaces this to the user so they understand
+    whether a search hit zero results because nothing matched OR
+    because the index has not yet covered that mailbox region.
+    Keys: ``vector_count``, ``phase1_complete``, ``incremental_ready``,
+    ``paused``.
+    """
+    out = {
+        "vector_count": 0,
+        "phase1_complete": False,
+        "incremental_ready": False,
+        "paused": False,
+    }
+    try:
+        from carpenter.packages.state import get_package_state_handle
+        from carpenter.packages.vectors import PackageVectorStore
+    except ImportError:
+        return out
+    try:
+        out["vector_count"] = PackageVectorStore("carpenter-email").count()
+    except Exception:
+        pass
+    pkg_state = get_package_state_handle("carpenter-email")
+    try:
+        out["phase1_complete"] = bool(
+            pkg_state.get("index_phase1_completed_at"),
+        )
+        out["incremental_ready"] = bool(
+            pkg_state.get("index_incremental_watermark"),
+        )
+        paused_raw = pkg_state.get("index_paused")
+        out["paused"] = bool(paused_raw)
+    except Exception:
+        pass
+    return out
+
+
+def _vector_search(
+    query_text: str, max_results: int,
+) -> list[dict] | None:
+    """Embed *query_text* and search the carpenter-email vector
+    namespace.  Returns a list of dicts ``{"provider_message_id":
+    str, "score": float, "metadata": dict}`` or ``None`` if vectors
+    are unavailable in this build.
+    """
+    try:
+        from carpenter.packages.vectors import PackageVectorStore
+    except ImportError:
+        return None
+    try:
+        vectors = PackageVectorStore("carpenter-email")
+        hits = vectors.embed_and_search(query_text, top_k=max_results)
+    except Exception:  # noqa: BLE001 — vector failures are not fatal
+        logger.exception(
+            "pkg_email_search_emails: vector backend failed; falling "
+            "back to keyword search",
+        )
+        return None
+    out: list[dict] = []
+    for vid, score, metadata in hits:
+        # Vector id is the provider_message_id by convention (the
+        # trigger upserts under this id).  Metadata floats are NEVER
+        # in trusted-context strings — E1 invariant.  We pass only
+        # the validated metadata fields the JUDGE graduated.
+        out.append({
+            "provider_message_id": str(vid),
+            "score": float(score),
+            "metadata": dict(metadata or {}),
+        })
+    return out
+
+
 @chat_tool(
     description=(
-        "Run a Gmail search and fan out one email_read_simple_text "
-        "arc per matching message.  Returns the parent arc id; "
-        "results arrive via the standard arc-completion notify "
-        "channel.  The chat agent never sees raw email bodies — "
-        "each child arc graduates a JUDGE-approved EmailSimpleTextExtract "
-        "Resource that the agent reads via read_resource."
+        "Search Gmail.  When the semantic resource index has covered "
+        "your mailbox (Phase 1 backfill complete) and the query "
+        "looks natural-language, returns vector-search hits "
+        "directly — no Gmail API round-trip needed.  Otherwise falls "
+        "back to a Gmail keyword search that fans out one "
+        "email_read_simple_text arc per matching message.  Returns "
+        "either the vector hits inline OR a parent arc id; in both "
+        "cases the chat agent never sees raw email bodies."
     ),
     input_schema={
         "type": "object",
@@ -785,20 +862,35 @@ def _create_search_executor(
             "query": {
                 "type": "string",
                 "description": (
-                    "Gmail search syntax string, e.g. "
-                    "\"newer_than:7d invoice\" or "
-                    "\"from:billing@example.com\"."
+                    "Free-form search string.  Gmail search syntax "
+                    "(e.g. \"newer_than:7d invoice\") is honored on "
+                    "the keyword path; the vector path treats the "
+                    "string as natural language."
                 ),
             },
             "max_results": {
                 "type": "integer",
                 "description": (
-                    "Maximum number of messages to fetch.  Capped at "
-                    "25 to bound work-queue load."
+                    "Maximum number of results.  Capped at 25 to "
+                    "bound work-queue load."
                 ),
                 "default": 10,
                 "minimum": 1,
                 "maximum": 25,
+            },
+            "backend": {
+                "type": "string",
+                "enum": ["auto", "vector", "keyword"],
+                "default": "auto",
+                "description": (
+                    "Which backend to use.  ``auto`` picks vector "
+                    "when the index is populated and the query has "
+                    "no Gmail-specific operators (\"from:\", "
+                    "\"newer_than:\", \"in:\", etc), keyword "
+                    "otherwise.  ``vector`` forces vector (returns "
+                    "empty hits if the index is unpopulated). "
+                    "``keyword`` forces the Gmail-API path."
+                ),
             },
         },
         "required": ["query"],
@@ -806,16 +898,67 @@ def _create_search_executor(
     capabilities=["arc_create"],
 )
 def pkg_email_search_emails(tool_input, **kwargs):
-    """Fan out an email_read_simple_text pipeline per matching message."""
+    """Vector-or-keyword email search with index-status surfacing."""
     query = (tool_input.get("query") or "").strip()
     max_results = int(tool_input.get("max_results") or 10)
+    backend = (tool_input.get("backend") or "auto").strip().lower()
     if not query:
         return json.dumps({"error": "query is required"})
     if max_results < 1 or max_results > 25:
         return json.dumps({"error": "max_results must be between 1 and 25"})
+    if backend not in ("auto", "vector", "keyword"):
+        return json.dumps({"error": "backend must be one of auto/vector/keyword"})
     if not _resolve_expected_account():
         return json.dumps({"error": _EXPECTED_ACCOUNT_NOT_CONFIGURED_ERROR})
 
+    index_status = _index_status_snapshot()
+
+    # Decide which backend to use.
+    has_gmail_op = any(
+        op in query.lower()
+        for op in (
+            "from:", "to:", "cc:", "bcc:", "subject:",
+            "newer_than:", "older_than:", "in:", "label:",
+            "has:", "filename:", "after:", "before:",
+        )
+    )
+    use_vector = False
+    if backend == "vector":
+        use_vector = True
+    elif backend == "auto":
+        # Auto: vector only if Phase 1 done, index non-empty, and the
+        # query is not in Gmail-operator form.
+        use_vector = (
+            index_status.get("vector_count", 0) > 0
+            and index_status.get("phase1_complete", False)
+            and not has_gmail_op
+        )
+
+    if use_vector:
+        hits = _vector_search(query, max_results)
+        if hits is None:
+            # Vector unavailable — fall through to keyword only if
+            # user did not explicitly force vector.
+            if backend == "vector":
+                return json.dumps({
+                    "error": "vector backend unavailable in this build",
+                    "index_status": index_status,
+                })
+            use_vector = False
+        else:
+            return json.dumps({
+                "backend": "vector",
+                "hits": hits,
+                "index_status": index_status,
+                "note": (
+                    f"{len(hits)} vector hit(s) returned without a "
+                    "Gmail API round-trip.  Pass a provider_message_id "
+                    "to pkg_email_read_email to graduate a typed "
+                    "extract Resource."
+                ),
+            })
+
+    # Keyword fallback: existing Phase 1 behaviour.
     conversation_id = kwargs.get("conversation_id")
     result = _create_search_executor(
         query=query,
@@ -823,13 +966,15 @@ def pkg_email_search_emails(tool_input, **kwargs):
         conversation_id=conversation_id,
     )
     if "error" in result:
-        return json.dumps(result)
+        return json.dumps({**result, "index_status": index_status})
     return json.dumps({
+        "backend": "keyword",
         "arc_id": result["arc_id"],
+        "index_status": index_status,
         "note": (
             "Search executor running.  When it completes, "
             "fan-out into per-message read pipelines is the "
-            "responsibility of a follow-up planner step (Phase 1.5)."
+            "responsibility of a follow-up planner step."
         ),
     })
 
@@ -1667,3 +1812,404 @@ def pkg_email_draft_email(tool_input, **kwargs):
             "provider_message_id."
         ),
     })
+
+
+# ---------------------------------------------------------------------------
+# Phase 4: semantic resource index — arc-tree helper + chat tools
+# ---------------------------------------------------------------------------
+
+
+# Maps Phase-4 template name → (extract_kind, script).
+def _index_template_meta(template_name: str) -> tuple[str, str]:
+    from .scripts import (
+        GMAIL_INDEX_INCREMENTAL_SCRIPT,
+        GMAIL_INDEX_PHASE1_SCRIPT,
+        GMAIL_INDEX_PHASE2_SCRIPT,
+    )
+    table = {
+        "email_index_phase1":      ("EmailIndexFetchedBatch", GMAIL_INDEX_PHASE1_SCRIPT),
+        "email_index_phase2":      ("EmailIndexFetchedBatch", GMAIL_INDEX_PHASE2_SCRIPT),
+        "email_index_incremental": ("EmailIndexFetchedBatch", GMAIL_INDEX_INCREMENTAL_SCRIPT),
+    }
+    return table[template_name]
+
+
+def _create_index_arc_tree(
+    *,
+    template_name: str,
+    phase: str,
+    batch_id: str,
+    watermark_before: str,
+    expected_account_email: str,
+    model_identity: str,
+    executor_state_seed: dict,
+) -> dict:
+    """Spin up one PLANNER -> EXECUTOR -> REVIEWER -> JUDGE arc tree
+    for one indexer tick.  Shape mirrors :func:`_create_read_arc_tree`
+    exactly; differences are:
+
+    * The EXECUTOR's script is the phase-specific index script.
+    * The REVIEWER's extract is :class:`EmailIndexFetchedBatch`.
+    * No chat conversation linkage — this is a trigger-driven pipeline.
+    * Additional pre-seeded state keys go to the EXECUTOR
+      (``executor_state_seed``) so phase-specific inputs (watermarks,
+      message-id lists) can be passed in.
+
+    Returns ``{"arc_id": <parent>, "extract_resource_id": <int>}`` on
+    success or ``{"error": ...}`` on failure.
+    """
+    from carpenter.core.arcs import manager as _am
+    from carpenter.core.engine import work_queue as _wq
+    from carpenter.core.resources import (
+        create_resource as _create_resource,
+        derive_resource as _derive_resource,
+        link_arc_resource as _link_arc_resource,
+        resource_storage_path as _resource_storage_path,
+    )
+    from carpenter.core.workflows._arc_state import set_arc_state
+    from carpenter.db import db_transaction as _db_transaction
+    from carpenter.tool_backends import arc as arc_backend
+
+    extract_kind, script = _index_template_meta(template_name)
+
+    parent_id = _am.create_arc(
+        name=f"Email index {phase}: {batch_id[:16]}",
+        goal=(
+            "Construct an EmailReviewBriefing dataclass from the "
+            "global SecurityPolicies.email allowlist snapshot and "
+            "the package's static suspicious-keyword list, then "
+            "derive_resource(kind='EmailReviewBriefing', "
+            "verdict='approved') as a born-trusted Resource.  The "
+            "EXECUTOR child has been pre-seeded with phase-specific "
+            "indexer inputs; the REVIEWER child will read the "
+            "briefing + raw fetch JSON and emit one "
+            "EmailIndexFetchedBatch; the JUDGE is deterministic "
+            "Python (no agent input needed)."
+        ),
+        agent_type="PLANNER",
+    )
+    _am.update_status(parent_id, "active")
+
+    batch_result = arc_backend.handle_create_batch({
+        "arcs": [
+            {
+                "name": f"Index-fetch {phase}: {batch_id[:16]}",
+                "goal": (
+                    "Submit this EXACT code via submit_code (do not "
+                    "modify it):\n```python\n"
+                    + script
+                    + "```\nAll inputs have been pre-seeded in arc "
+                    "state.  Do not generate your own code; this "
+                    "script has been audited by the package author."
+                ),
+                "parent_id": parent_id,
+                "integrity_level": "untrusted",
+                "output_type": "json",
+                "agent_type": "EXECUTOR",
+                "step_order": 0,
+            },
+            {
+                "name": "Review index batch",
+                "goal": (
+                    "Read the briefing Resource and the raw_fetch "
+                    "Resource (paths in arc state under "
+                    "'briefing_resource_id' and 'raw_resource_path'). "
+                    "Follow the static REVIEWER prompt shipped with "
+                    "this template.  Emit exactly one "
+                    "EmailIndexFetchedBatch via derive_resource. "
+                    "Then exit — the deterministic JUDGE will "
+                    "validate and graduate."
+                ),
+                "parent_id": parent_id,
+                "agent_type": "REVIEWER",
+                "integrity_level": "trusted",
+                "reviewer_profile": "security-reviewer",
+                "model_policy": "careful-coding",
+                "step_order": 1,
+            },
+            {
+                "name": "Judge index batch",
+                "goal": (
+                    "JUDGE: validate the REVIEWER's "
+                    "EmailIndexFetchedBatch Resource.  Call "
+                    "resource.submit_verdict with the extract's "
+                    "resource_id (in arc state under "
+                    "'_review_target_resource_id') and "
+                    "verdict='approved' or 'rejected' based on the "
+                    "package's deterministic JUDGE handler "
+                    "(judge_email_index_fetched_batch, auto-dispatched "
+                    "by the platform via _try_package_judge)."
+                ),
+                "parent_id": parent_id,
+                "agent_type": "JUDGE",
+                "integrity_level": "trusted",
+                "reviewer_profile": "judge",
+                "step_order": 2,
+            },
+        ],
+    })
+    if "error" in batch_result:
+        try:
+            _am.update_status(parent_id, "failed")
+        except Exception:  # noqa: BLE001
+            pass
+        return {"error": batch_result["error"]}
+
+    child_ids = batch_result["arc_ids"]
+    executor_arc_id, reviewer_arc_id, judge_arc_id = child_ids[:3]
+
+    # Raw fetch Resource (untrusted) — receives the EXECUTOR's JSON.
+    raw_resource_id = _create_resource(
+        content_type="json",
+        file_path=None,
+        produced_by_arc_id=executor_arc_id,
+        source_descriptor=f"gmail.index.{phase}:{batch_id}",
+    )
+    raw_path = _resource_storage_path(raw_resource_id, "blob")
+    raw_path.parent.mkdir(parents=True, exist_ok=True)
+    with _db_transaction() as _db:
+        _db.execute(
+            "UPDATE resources SET file_path = ? WHERE id = ?",
+            (str(raw_path), raw_resource_id),
+        )
+    _link_arc_resource(
+        arc_id=executor_arc_id, resource_id=raw_resource_id, role="output",
+    )
+
+    # Briefing Resource (born-trusted).
+    briefing_resource_id = _derive_resource(
+        content_type="dataclass",
+        file_path=None,
+        produced_by_arc_id=parent_id,
+        produced_by_template=template_name,
+        template_verdict="approved",
+        source_descriptor=f"briefing:{template_name}",
+    )
+    briefing_path = _resource_storage_path(briefing_resource_id, "blob")
+    briefing_path.parent.mkdir(parents=True, exist_ok=True)
+    with _db_transaction() as _db:
+        _db.execute(
+            "UPDATE resources SET file_path = ? WHERE id = ?",
+            (str(briefing_path), briefing_resource_id),
+        )
+
+    # Extract Resource (pending until JUDGE).
+    extract_resource_id = _derive_resource(
+        content_type="dataclass",
+        file_path=None,
+        produced_by_arc_id=reviewer_arc_id,
+        produced_by_template=template_name,
+        template_verdict="pending",
+        source_descriptor=f"index.batch:{phase}:{batch_id}",
+    )
+    extract_path = _resource_storage_path(extract_resource_id, "blob")
+    extract_path.parent.mkdir(parents=True, exist_ok=True)
+    with _db_transaction() as _db:
+        _db.execute(
+            "UPDATE resources SET file_path = ? WHERE id = ?",
+            (str(extract_path), extract_resource_id),
+        )
+
+    _link_arc_resource(
+        arc_id=reviewer_arc_id, resource_id=briefing_resource_id, role="input",
+    )
+    _link_arc_resource(
+        arc_id=reviewer_arc_id, resource_id=raw_resource_id, role="input",
+    )
+    _link_arc_resource(
+        arc_id=reviewer_arc_id, resource_id=extract_resource_id, role="output",
+    )
+
+    # Pre-seed arc state.
+    set_arc_state(executor_arc_id, "raw_resource_path", str(raw_path))
+    set_arc_state(executor_arc_id, "raw_resource_id", raw_resource_id)
+    set_arc_state(executor_arc_id, "expected_account_email", expected_account_email)
+    set_arc_state(executor_arc_id, "model_identity", model_identity)
+    set_arc_state(executor_arc_id, "batch_id", batch_id)
+    set_arc_state(executor_arc_id, "phase", phase)
+    for k, v in executor_state_seed.items():
+        set_arc_state(executor_arc_id, k, v)
+
+    set_arc_state(parent_id, "expected_account_email", expected_account_email)
+    set_arc_state(parent_id, "briefing_resource_id", briefing_resource_id)
+    set_arc_state(parent_id, "_primary_resource_id", extract_resource_id)
+    set_arc_state(parent_id, "template_name", template_name)
+    set_arc_state(parent_id, "extract_kind", extract_kind)
+    set_arc_state(parent_id, "index_phase", phase)
+    set_arc_state(parent_id, "index_batch_id", batch_id)
+    set_arc_state(parent_id, "index_watermark_before", watermark_before)
+    set_arc_state(parent_id, "index_model_identity", model_identity)
+
+    set_arc_state(reviewer_arc_id, "briefing_resource_id", briefing_resource_id)
+    set_arc_state(reviewer_arc_id, "raw_resource_path", str(raw_path))
+    set_arc_state(reviewer_arc_id, "raw_resource_id", raw_resource_id)
+    set_arc_state(reviewer_arc_id, "extract_resource_id", extract_resource_id)
+    set_arc_state(reviewer_arc_id, "extract_kind", extract_kind)
+    set_arc_state(reviewer_arc_id, "template_name", template_name)
+
+    set_arc_state(
+        judge_arc_id, "_review_target_resource_id", extract_resource_id,
+    )
+    set_arc_state(judge_arc_id, "extract_resource_id", extract_resource_id)
+
+    _wq.enqueue(
+        "arc.dispatch",
+        {"arc_id": executor_arc_id},
+        idempotency_key=f"arc_dispatch:{executor_arc_id}",
+    )
+    return {
+        "arc_id": parent_id,
+        "extract_resource_id": extract_resource_id,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Phase 4 chat tools
+# ---------------------------------------------------------------------------
+
+
+@chat_tool(
+    description=(
+        "Force a re-index of the email semantic resource index.  Wipes "
+        "the package's vector namespace and resets all three indexer "
+        "watermarks so Phase 1 backfill restarts from the top of the "
+        "mailbox.  Requires user confirmation at the chat boundary.  "
+        "The indexer triggers pick up the work on their next 60-second "
+        "tick; no arc is spawned synchronously."
+    ),
+    input_schema={
+        "type": "object",
+        "properties": {
+            "reason": {
+                "type": "string",
+                "description": (
+                    "Short free-text reason for the reindex (logged "
+                    "to package_state for audit; <= 256 chars)."
+                ),
+                "maxLength": 256,
+            },
+        },
+        "required": [],
+    },
+    requires_user_confirm=True,
+    capabilities=[],
+)
+def pkg_email_reindex(tool_input, **kwargs):
+    """Wipe the email vector namespace and reset indexer watermarks."""
+    reason = (tool_input.get("reason") or "").strip()[:256]
+    try:
+        from carpenter.packages.state import get_package_state_handle
+        from carpenter.packages.vectors import PackageVectorStore
+    except ImportError:
+        return json.dumps({"error": "package.state / package.vectors unavailable"})
+    pkg_state = get_package_state_handle("carpenter-email")
+    vectors = PackageVectorStore("carpenter-email")
+    try:
+        cleared = vectors.clear()
+    except Exception as exc:  # noqa: BLE001
+        return json.dumps({"error": f"vector clear failed: {exc}"})
+    # Wipe all indexer watermarks and progress markers.  We do NOT
+    # wipe the Phase 3a triage watermark (history_id) — that's a
+    # separate concern.
+    for key in (
+        "index_phase1_watermark",
+        "index_phase2_watermark",
+        "index_incremental_watermark",
+        "index_phase1_completed_at",
+        "index_phase2_completed_at",
+        "index_running",
+        "index_paused",
+        "index_last_batch_id",
+        "index_last_phase",
+    ):
+        try:
+            pkg_state.delete(key)
+        except Exception:
+            pass
+    try:
+        pkg_state.set(
+            "index_last_reindex",
+            json.dumps({"reason": reason, "vectors_cleared": int(cleared)}),
+        )
+    except Exception:
+        pass
+    return json.dumps({
+        "ok": True,
+        "vectors_cleared": int(cleared),
+        "note": (
+            "Indexer watermarks reset.  The Phase 1 / Phase 2 / "
+            "incremental triggers will resume on their next tick."
+        ),
+    })
+
+
+@chat_tool(
+    description=(
+        "Pause all three email indexer triggers (Phase 1, Phase 2, "
+        "incremental).  Useful when the user is hitting their Gmail "
+        "API quota or wants to suspend background work.  Does not "
+        "cancel in-flight arcs; new arcs simply will not spawn until "
+        "pkg_email_reindex_resume is called.  Requires user confirm."
+    ),
+    input_schema={
+        "type": "object",
+        "properties": {
+            "reason": {
+                "type": "string",
+                "description": "Short free-text reason (<= 256 chars).",
+                "maxLength": 256,
+            },
+        },
+        "required": [],
+    },
+    requires_user_confirm=True,
+    capabilities=[],
+)
+def pkg_email_reindex_pause(tool_input, **kwargs):
+    """Set the indexer pause flag in package_state."""
+    reason = (tool_input.get("reason") or "").strip()[:256]
+    try:
+        from carpenter.packages.state import get_package_state_handle
+    except ImportError:
+        return json.dumps({"error": "package.state unavailable"})
+    pkg_state = get_package_state_handle("carpenter-email")
+    try:
+        pkg_state.set(
+            "index_paused",
+            json.dumps({"paused": True, "reason": reason}),
+        )
+    except Exception as exc:  # noqa: BLE001
+        return json.dumps({"error": f"pause failed: {exc}"})
+    return json.dumps({
+        "ok": True,
+        "note": "Indexer paused.  Run pkg_email_reindex_resume to resume.",
+    })
+
+
+@chat_tool(
+    description=(
+        "Resume the email indexer triggers after a pause.  Clears the "
+        "package_state pause flag; the next 60-second heartbeat will "
+        "pick up where the indexer left off (watermark-based, no work "
+        "is lost across pauses).  Requires user confirm."
+    ),
+    input_schema={
+        "type": "object",
+        "properties": {},
+        "required": [],
+    },
+    requires_user_confirm=True,
+    capabilities=[],
+)
+def pkg_email_reindex_resume(tool_input, **kwargs):
+    """Clear the indexer pause flag."""
+    try:
+        from carpenter.packages.state import get_package_state_handle
+    except ImportError:
+        return json.dumps({"error": "package.state unavailable"})
+    pkg_state = get_package_state_handle("carpenter-email")
+    try:
+        pkg_state.delete("index_paused")
+    except Exception as exc:  # noqa: BLE001
+        return json.dumps({"error": f"resume failed: {exc}"})
+    return json.dumps({"ok": True, "note": "Indexer resumed."})

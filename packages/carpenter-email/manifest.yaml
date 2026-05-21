@@ -1,5 +1,5 @@
 name: carpenter-email
-version: "0.5.0"
+version: "0.6.0"
 description: |
   Email assistant package (Gmail API backend).  Phase 1 shipped read
   templates through the D24 untrusted-data pipeline and send mail
@@ -30,13 +30,26 @@ description: |
   Read-side ships three review templates (simple text, meeting
   invite, order confirmation), unchanged.
 
-  Phase 3b (this version, 0.5.0) surfaces email attachment METADATA
+  Phase 3b (0.5.0) surfaces email attachment METADATA
   (filename, MIME, size, attachmentId, is_inline) into the four
   read-side extracts (simple_text, meeting_invite,
   order_confirmation, email_triage).  No bytes are fetched and no
   new Gmail scope is required — the data is already present in the
   existing users.messages.get full-format response.  See
   kb/attachments.md for the trust contract.
+
+  Phase 4 (this version, 0.6.0) introduces a per-package semantic
+  resource index.  Three PollableTriggers (60-second cadence)
+  backfill the mailbox in descending internalDate order (Phase 1),
+  re-index pre-seeded message-id lists (Phase 2), and pick up
+  newly-arrived messages via Gmail history.list (incremental).
+  Each tick spawns a PLANNER -> EXECUTOR -> REVIEWER -> JUDGE arc
+  tree that emits one JUDGE-validated EmailIndexFetchedBatch; the
+  trigger then embed+upserts the validated metadata into the
+  carpenter-email PackageVectorStore in trusted post-JUDGE context.
+  No core-platform changes — vector floats never appear in a
+  trusted-context string (package-internal invariant E1).  See
+  kb/email/index.md for the trust contract and operator model.
 
 chat_tools:
   - tools.py
@@ -65,6 +78,11 @@ data_models:
   # the dispatch loader can resolve the ``tuple[AttachmentMetadata, ...]``
   # field annotations.
   - AttachmentMetadata
+  # Phase 4: semantic resource index.  Two new graduating kinds plus
+  # the per-entry sub-component carried inside each batch.
+  - EmailIndexFetchedEntry
+  - EmailIndexFetchedBatch
+  - EmailIndexBatchReceipt
 
 # Seven templates total: three Phase 1 read templates plus four
 # Phase 1.5 v2 write templates.  All seven share the canonical
@@ -112,6 +130,24 @@ arc_templates:
     briefing_kind: EmailReviewBriefing
     extract_kind: EmailTriageExtract
     judge_handler: judges:judge_email_triage
+  # Phase 4: semantic resource index.  All three share the same
+  # graduating kind and the same JUDGE handler (the handler reads
+  # ``phase`` off the dataclass to apply phase-specific rules).
+  - name: email_index_phase1
+    path: templates/email-index-phase1/template.yaml
+    briefing_kind: EmailReviewBriefing
+    extract_kind: EmailIndexFetchedBatch
+    judge_handler: judges:judge_email_index_fetched_batch
+  - name: email_index_phase2
+    path: templates/email-index-phase2/template.yaml
+    briefing_kind: EmailReviewBriefing
+    extract_kind: EmailIndexFetchedBatch
+    judge_handler: judges:judge_email_index_fetched_batch
+  - name: email_index_incremental
+    path: templates/email-index-incremental/template.yaml
+    briefing_kind: EmailReviewBriefing
+    extract_kind: EmailIndexFetchedBatch
+    judge_handler: judges:judge_email_index_fetched_batch
 
 judge_handlers:
   - name: judge_simple_text
@@ -130,6 +166,13 @@ judge_handlers:
     module: judges
   - name: judge_email_triage
     module: judges
+  # Phase 4 JUDGES.  ``judge_email_index_fetched_batch`` validates
+  # the per-tick metadata harvest before the trigger embeds + upserts.
+  # ``judge_email_index_batch`` validates the post-embed audit receipt.
+  - name: judge_email_index_fetched_batch
+    module: judges
+  - name: judge_email_index_batch
+    module: judges
 
 # KB articles seeded into kb/email/* on install.
 kb_articles:
@@ -145,6 +188,10 @@ kb_articles:
     path: kb/inbound-triage.md
   - slug: email/attachments
     path: kb/attachments.md
+  - slug: email/index
+    path: kb/index.md
+  - slug: email/search
+    path: kb/search.md
 
 # Phase 3a: in-process trigger that polls Gmail history every 15
 # minutes and emits one email.received event per newly-arrived
@@ -158,6 +205,30 @@ triggers:
     config:
       cadence_seconds: 900   # 15 minutes
       event_type: email.received
+  # Phase 4: three semantic-index triggers.  All three share the
+  # ``index_running`` CAS mutex so only one tick runs at a time
+  # (per ``_index_common.IndexTriggerBase``).
+  - name: gmail-index-phase1
+    type: email_index_phase1
+    module: triggers/email_index_phase1.py
+    enabled: true
+    config:
+      cadence_seconds: 60
+      max_batch: 100
+  - name: gmail-index-phase2
+    type: email_index_phase2
+    module: triggers/email_index_phase2.py
+    enabled: true
+    config:
+      cadence_seconds: 60
+      max_batch: 50
+  - name: gmail-index-incremental
+    type: email_index_incremental
+    module: triggers/email_index_incremental.py
+    enabled: true
+    config:
+      cadence_seconds: 60
+      max_batch: 25
 
 # Phase 3a: route each email.received event into a triage arc tree.
 # The handler is a thin shim that spawns the email_triage arc tree

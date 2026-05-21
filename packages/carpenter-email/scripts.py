@@ -523,3 +523,413 @@ dispatch(Label("files.write"), {
 })
 dispatch(Label("resource.finalize"), {"resource_id": raw_resource_id})
 '''
+
+
+# ---------------------------------------------------------------------------
+# Phase 4: Semantic resource index scripts.
+#
+# These three EXECUTOR scripts feed the email vector index.  None of
+# them invoke ``state.set`` or any embedding/vector RPC: their only job
+# is to call Gmail, write a JSON ``EmailIndexFetchedBatch`` document to
+# disk for the REVIEWER + JUDGE, and finalize the resource.  Embedding
+# and upsert happen in the trusted trigger callback *after* JUDGE
+# verdict (D24 I3 closure).
+#
+# Pre-seeded arc state for all three scripts:
+#   * raw_resource_path     : str  (where to write the JSON batch)
+#   * raw_resource_id       : int  (the Resource row to finalize)
+#   * expected_account_email: str  (used by Phase 1 / incremental;
+#                                   Phase 2 also enforces it)
+#   * model_identity        : str  (current embedding model identity;
+#                                   the script does not embed but the
+#                                   JUDGE compares it against the
+#                                   trigger snapshot)
+#   * batch_id              : str  (opaque id for the batch)
+#   * phase                 : str  (one of EMAIL_INDEX_PHASES)
+#
+# Phase-specific state keys are listed inline.
+
+# Phase 1: backfill by descending Gmail ``internalDate``.
+#
+# Pre-seeded state keys:
+#   * watermark_before : str (Gmail internalDate at or above which the
+#                             EXECUTOR skips; "" on first run)
+#   * max_batch        : int (capped by JUDGE to 100)
+#
+# Watermark format is the bare Gmail ``internalDate`` numeric string
+# (matches the JUDGE's ``^[a-zA-Z0-9_:.-]{0,128}$`` shape).
+GMAIL_INDEX_PHASE1_SCRIPT = '''\
+from carpenter_tools.declarations import Label
+import os
+import json as _json
+
+# ----- inputs ---------------------------------------------------------
+def _state(key):
+    return dispatch(Label("state.get"), {"key": Label(key)})[Label("value")]
+
+raw_resource_path     = _state("raw_resource_path")
+raw_resource_id       = _state("raw_resource_id")
+expected_account      = _state("expected_account_email")
+model_identity        = _state("model_identity")
+batch_id              = _state("batch_id")
+phase                 = _state("phase")
+watermark_before = _state("watermark_before")
+max_batch        = int(_state("max_batch"))
+if max_batch < 1:
+    max_batch = 1
+if max_batch > 100:
+    max_batch = 100
+
+access_token = os.environ.get("GMAIL_OAUTH_ACCESS_TOKEN", "")
+if not access_token:
+    raise RuntimeError("GMAIL_OAUTH_ACCESS_TOKEN not present in env")
+
+# ----- userinfo enforcement ------------------------------------------
+who = dispatch(Label("web.get"), {
+    "url": "https://www.googleapis.com/oauth2/v3/userinfo",
+    "headers": {"Authorization": "Bearer " + access_token},
+})
+if who[Label("status_code")] != 200:
+    raise RuntimeError("userinfo lookup failed: " + str(who[Label("status_code")]))
+who_body = _json.loads(who[Label("text")])
+actual = (who_body.get("email") or "").strip().lower()
+if actual != (expected_account or "").strip().lower():
+    raise RuntimeError(
+        "expected-account check failed: token=" + repr(actual)
+        + " briefing=" + repr(expected_account)
+    )
+
+# ----- list ids -------------------------------------------------------
+list_result = dispatch(Label("web.get"), {
+    "url": (
+        "https://gmail.googleapis.com/gmail/v1/users/me/messages"
+        "?maxResults=" + str(max_batch)
+        + "&includeSpamTrash=false"
+    ),
+    "headers": {"Authorization": "Bearer " + access_token},
+})
+if list_result[Label("status_code")] != 200:
+    raise RuntimeError(
+        "messages.list failed: " + str(list_result[Label("status_code")])
+        + " body=" + list_result[Label("text")][:200]
+    )
+list_body = _json.loads(list_result[Label("text")])
+ids = [m.get("id") or "" for m in (list_body.get("messages") or [])]
+ids = [mid for mid in ids if mid]
+
+# ----- fetch metadata for each id ------------------------------------
+entries = []
+skipped = 0
+new_watermark = watermark_before
+
+for mid in ids:
+    meta = dispatch(Label("web.get"), {
+        "url": (
+            "https://gmail.googleapis.com/gmail/v1/users/me/messages/"
+            + mid + "?format=metadata"
+            + "&metadataHeaders=Subject"
+            + "&metadataHeaders=From"
+            + "&metadataHeaders=To"
+            + "&metadataHeaders=Cc"
+            + "&metadataHeaders=Date"
+        ),
+        "headers": {"Authorization": "Bearer " + access_token},
+    })
+    if meta[Label("status_code")] != 200:
+        skipped += 1
+        continue
+    m = _json.loads(meta[Label("text")])
+    headers = {h.get("name", ""): h.get("value", "") for h in (m.get("payload") or {}).get("headers", [])}
+    internal_date = m.get("internalDate") or ""
+    # Skip past-watermark messages (descending walk).
+    if watermark_before and internal_date and internal_date >= watermark_before:
+        skipped += 1
+        continue
+    entries.append({
+        "provider_message_id": m.get("id") or mid,
+        "thread_id": m.get("threadId") or "",
+        "internal_date": internal_date,
+        "subject": headers.get("Subject", "")[:512],
+        "from_header": headers.get("From", "")[:256],
+        "to_header": headers.get("To", "")[:1024],
+        "cc_header": headers.get("Cc", "")[:1024],
+        "date_header": headers.get("Date", "")[:128],
+        "label_ids": tuple(m.get("labelIds") or ()),
+        "snippet": (m.get("snippet") or "")[:512],
+        "schema_version": 1,
+    })
+    # Track the smallest (oldest) internalDate seen this batch; that's
+    # what we hand back as the new watermark for descending walk.
+    if internal_date:
+        if not new_watermark or internal_date < new_watermark:
+            new_watermark = internal_date
+
+batch = {
+    "phase": phase,
+    "batch_id": batch_id,
+    "watermark_before": watermark_before,
+    "watermark_after":  new_watermark,
+    "entries": entries,
+    "fetched_count": len(entries) + skipped,
+    "skipped_count": skipped,
+    "model_identity": model_identity,
+    "expected_account_email": actual,
+    "error_kind": "",
+    "schema_version": 1,
+}
+
+dispatch(Label("files.write"), {
+    "path": raw_resource_path,
+    "content": _json.dumps(batch),
+})
+dispatch(Label("resource.finalize"), {"resource_id": raw_resource_id})
+'''
+
+
+# Phase 2: re-index bodies for a pre-seeded list of message ids.
+#
+# Pre-seeded state keys:
+#   * message_ids_json : str (JSON array of provider message ids)
+GMAIL_INDEX_PHASE2_SCRIPT = '''\
+from carpenter_tools.declarations import Label
+import os
+import json as _json
+
+def _state(key):
+    return dispatch(Label("state.get"), {"key": Label(key)})[Label("value")]
+
+raw_resource_path = _state("raw_resource_path")
+raw_resource_id   = _state("raw_resource_id")
+expected_account  = _state("expected_account_email")
+model_identity    = _state("model_identity")
+batch_id          = _state("batch_id")
+phase             = _state("phase")
+message_ids_json  = _state("message_ids_json")
+
+ids = _json.loads(message_ids_json)
+if not isinstance(ids, list):
+    raise RuntimeError("message_ids_json must be a JSON array")
+ids = [str(x) for x in ids if isinstance(x, str) and x][:100]
+
+access_token = os.environ.get("GMAIL_OAUTH_ACCESS_TOKEN", "")
+if not access_token:
+    raise RuntimeError("GMAIL_OAUTH_ACCESS_TOKEN not present in env")
+
+who = dispatch(Label("web.get"), {
+    "url": "https://www.googleapis.com/oauth2/v3/userinfo",
+    "headers": {"Authorization": "Bearer " + access_token},
+})
+if who[Label("status_code")] != 200:
+    raise RuntimeError("userinfo lookup failed: " + str(who[Label("status_code")]))
+who_body = _json.loads(who[Label("text")])
+actual = (who_body.get("email") or "").strip().lower()
+if actual != (expected_account or "").strip().lower():
+    raise RuntimeError("expected-account check failed: token=" + repr(actual))
+
+entries = []
+skipped = 0
+for mid in ids:
+    meta = dispatch(Label("web.get"), {
+        "url": (
+            "https://gmail.googleapis.com/gmail/v1/users/me/messages/"
+            + mid + "?format=metadata"
+            + "&metadataHeaders=Subject"
+            + "&metadataHeaders=From"
+            + "&metadataHeaders=To"
+            + "&metadataHeaders=Cc"
+            + "&metadataHeaders=Date"
+        ),
+        "headers": {"Authorization": "Bearer " + access_token},
+    })
+    if meta[Label("status_code")] != 200:
+        skipped += 1
+        continue
+    m = _json.loads(meta[Label("text")])
+    headers = {h.get("name", ""): h.get("value", "") for h in (m.get("payload") or {}).get("headers", [])}
+    entries.append({
+        "provider_message_id": m.get("id") or mid,
+        "thread_id": m.get("threadId") or "",
+        "internal_date": m.get("internalDate") or "",
+        "subject": headers.get("Subject", "")[:512],
+        "from_header": headers.get("From", "")[:256],
+        "to_header": headers.get("To", "")[:1024],
+        "cc_header": headers.get("Cc", "")[:1024],
+        "date_header": headers.get("Date", "")[:128],
+        "label_ids": tuple(m.get("labelIds") or ()),
+        "snippet": (m.get("snippet") or "")[:512],
+        "schema_version": 1,
+    })
+
+batch = {
+    "phase": phase,
+    "batch_id": batch_id,
+    "watermark_before": "",
+    "watermark_after":  "",
+    "entries": entries,
+    "fetched_count": len(entries) + skipped,
+    "skipped_count": skipped,
+    "model_identity": model_identity,
+    "expected_account_email": actual,
+    "error_kind": "",
+    "schema_version": 1,
+}
+
+dispatch(Label("files.write"), {
+    "path": raw_resource_path,
+    "content": _json.dumps(batch),
+})
+dispatch(Label("resource.finalize"), {"resource_id": raw_resource_id})
+'''
+
+
+# Incremental: walk Gmail history.list from a stored historyId.
+#
+# Pre-seeded state keys:
+#   * start_history_id    : str (Gmail historyId watermark; required;
+#                                "" means trigger should not have
+#                                emitted)
+#
+# Watermark format is the bare Gmail ``historyId`` numeric string.
+GMAIL_INDEX_INCREMENTAL_SCRIPT = '''\
+from carpenter_tools.declarations import Label
+import os
+import json as _json
+
+def _state(key):
+    return dispatch(Label("state.get"), {"key": Label(key)})[Label("value")]
+
+raw_resource_path = _state("raw_resource_path")
+raw_resource_id   = _state("raw_resource_id")
+expected_account  = _state("expected_account_email")
+model_identity    = _state("model_identity")
+batch_id          = _state("batch_id")
+phase             = _state("phase")
+start_history_id  = _state("start_history_id")
+
+if not start_history_id:
+    raise RuntimeError("start_history_id is required for incremental phase")
+
+access_token = os.environ.get("GMAIL_OAUTH_ACCESS_TOKEN", "")
+if not access_token:
+    raise RuntimeError("GMAIL_OAUTH_ACCESS_TOKEN not present in env")
+
+who = dispatch(Label("web.get"), {
+    "url": "https://www.googleapis.com/oauth2/v3/userinfo",
+    "headers": {"Authorization": "Bearer " + access_token},
+})
+if who[Label("status_code")] != 200:
+    raise RuntimeError("userinfo lookup failed: " + str(who[Label("status_code")]))
+who_body = _json.loads(who[Label("text")])
+actual = (who_body.get("email") or "").strip().lower()
+if actual != (expected_account or "").strip().lower():
+    raise RuntimeError("expected-account check failed: token=" + repr(actual))
+
+hist = dispatch(Label("web.get"), {
+    "url": (
+        "https://gmail.googleapis.com/gmail/v1/users/me/history"
+        "?startHistoryId=" + start_history_id
+        + "&historyTypes=messageAdded"
+        + "&maxResults=100"
+    ),
+    "headers": {"Authorization": "Bearer " + access_token},
+})
+hist_status = hist[Label("status_code")]
+if hist_status == 404:
+    # historyId expired (>7 days).  Surface a structured error so the
+    # JUDGE can route the trigger back to Phase 1.
+    batch = {
+        "phase": phase,
+        "batch_id": batch_id,
+        "watermark_before": start_history_id,
+        "watermark_after":  start_history_id,
+        "entries": [],
+        "fetched_count": 0,
+        "skipped_count": 0,
+        "model_identity": model_identity,
+        "expected_account_email": actual,
+        "error_kind": "history_expired",
+        "schema_version": 1,
+    }
+    dispatch(Label("files.write"), {
+        "path": raw_resource_path,
+        "content": _json.dumps(batch),
+    })
+    dispatch(Label("resource.finalize"), {"resource_id": raw_resource_id})
+elif hist_status != 200:
+    raise RuntimeError(
+        "history.list failed: " + str(hist_status)
+        + " body=" + hist[Label("text")][:200]
+    )
+else:
+    hist_body = _json.loads(hist[Label("text")])
+    new_history_id = hist_body.get("historyId") or start_history_id
+    added_ids = []
+    for entry in (hist_body.get("history") or ()):
+        for ma in (entry.get("messagesAdded") or ()):
+            msg = ma.get("message") or {}
+            mid = msg.get("id") or ""
+            if mid:
+                added_ids.append(mid)
+    # Dedupe while preserving order.
+    seen = set()
+    unique_ids = []
+    for mid in added_ids:
+        if mid in seen:
+            continue
+        seen.add(mid)
+        unique_ids.append(mid)
+    unique_ids = unique_ids[:100]
+
+    entries = []
+    skipped = 0
+    for mid in unique_ids:
+        meta = dispatch(Label("web.get"), {
+            "url": (
+                "https://gmail.googleapis.com/gmail/v1/users/me/messages/"
+                + mid + "?format=metadata"
+                + "&metadataHeaders=Subject"
+                + "&metadataHeaders=From"
+                + "&metadataHeaders=To"
+                + "&metadataHeaders=Cc"
+                + "&metadataHeaders=Date"
+            ),
+            "headers": {"Authorization": "Bearer " + access_token},
+        })
+        if meta[Label("status_code")] != 200:
+            skipped += 1
+            continue
+        m = _json.loads(meta[Label("text")])
+        headers = {h.get("name", ""): h.get("value", "") for h in (m.get("payload") or {}).get("headers", [])}
+        entries.append({
+            "provider_message_id": m.get("id") or mid,
+            "thread_id": m.get("threadId") or "",
+            "internal_date": m.get("internalDate") or "",
+            "subject": headers.get("Subject", "")[:512],
+            "from_header": headers.get("From", "")[:256],
+            "to_header": headers.get("To", "")[:1024],
+            "cc_header": headers.get("Cc", "")[:1024],
+            "date_header": headers.get("Date", "")[:128],
+            "label_ids": tuple(m.get("labelIds") or ()),
+            "snippet": (m.get("snippet") or "")[:512],
+            "schema_version": 1,
+        })
+
+    batch = {
+        "phase": phase,
+        "batch_id": batch_id,
+        "watermark_before": start_history_id,
+        "watermark_after":  new_history_id,
+        "entries": entries,
+        "fetched_count": len(entries) + skipped,
+        "skipped_count": skipped,
+        "model_identity": model_identity,
+        "expected_account_email": actual,
+        "error_kind": "",
+        "schema_version": 1,
+    }
+    dispatch(Label("files.write"), {
+        "path": raw_resource_path,
+        "content": _json.dumps(batch),
+    })
+    dispatch(Label("resource.finalize"), {"resource_id": raw_resource_id})
+'''
