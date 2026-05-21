@@ -379,9 +379,11 @@ class IndexTriggerBase(PollableTrigger):
             )
 
         # Load the JUDGE-graduated extract.  ``read_resource_content``
-        # returns bytes; deserialise the dataclass via the platform's
-        # JUDGE-dispatch deserialiser if available, else direct JSON.
-        raw = _read_resource_content(resource_id)
+        # returns the file text; deserialise the dataclass via the
+        # platform's JUDGE-dispatch deserialiser if available, else
+        # direct JSON.  ``caller_arc_id=None`` is the trigger-context
+        # form — we are not an arc, but a trusted in-process worker.
+        raw = _read_resource_content(resource_id, caller_arc_id=None)
         batch = self._deserialise_batch(raw, EmailIndexFetchedBatch)
         if not isinstance(batch, EmailIndexFetchedBatch):
             raise RuntimeError(
@@ -482,51 +484,42 @@ class IndexTriggerBase(PollableTrigger):
             self._mark_phase_finished()
 
     def _deserialise_batch(self, raw: Any, klass) -> Any:
-        """Try the platform's typed deserialiser, fall back to JSON."""
-        # Try the platform's JUDGE-dispatch deserialiser if importable.
-        try:
-            from carpenter.core.resources.judge_dispatch import (
-                deserialise_dataclass,
-            )
-            return deserialise_dataclass(raw, klass)
-        except Exception:
-            pass
-        # Fallback: JSON-only.  Resources written by derive_resource
-        # are JSON-serialised dataclass dicts.
+        """Reconstruct an EmailIndexFetchedBatch from the JSON text on
+        disk.  Mirrors the platform's :func:`_load_extraction_resource`
+        kind-based dispatch (kind -> ``cls(**payload)``) but tolerates
+        the nested ``entries`` tuple-of-dataclass shape that the
+        platform handles for kind-less Resources via a recursive
+        ``from_dict`` style.
+        """
         if isinstance(raw, (bytes, bytearray)):
             raw = raw.decode("utf-8", errors="replace")
         if isinstance(raw, str):
-            try:
-                data = json.loads(raw)
-            except Exception:
-                raise
+            data = json.loads(raw)
         elif isinstance(raw, dict):
             data = raw
         else:
             raise RuntimeError(
                 f"cannot deserialise resource bytes of type {type(raw).__name__}",
             )
-        # Reconstruct dataclass best-effort.  This is a defensive
-        # path: the JUDGE-dispatch deserialiser should normally be
-        # available.
         from dataclasses import fields, is_dataclass
         if not is_dataclass(klass):
             raise RuntimeError(f"{klass!r} is not a dataclass")
-        # Rebuild nested entries if present.
         try:
             from carpenter_email.data_models import EmailIndexFetchedEntry
         except ImportError:
             from .data_models import EmailIndexFetchedEntry  # type: ignore
         entries_raw = data.get("entries") or ()
+        entry_fields = {f.name for f in fields(EmailIndexFetchedEntry)}
         entries = tuple(
             EmailIndexFetchedEntry(**{
                 k: (tuple(v) if isinstance(v, list) else v)
                 for k, v in e.items()
-                if k in {f.name for f in fields(EmailIndexFetchedEntry)}
+                if k in entry_fields
             })
             for e in entries_raw
         )
-        clean = {f.name: data.get(f.name) for f in fields(klass)}
+        klass_fields = {f.name for f in fields(klass)}
+        clean = {k: data.get(k) for k in klass_fields if k != "entries"}
         clean["entries"] = entries
         return klass(**clean)
 
