@@ -1,5 +1,5 @@
 name: carpenter-email
-version: "0.4.0"
+version: "0.5.0"
 description: |
   Email assistant package (Gmail API backend).  Phase 1 shipped read
   templates through the D24 untrusted-data pipeline and send mail
@@ -30,6 +30,14 @@ description: |
   Read-side ships three review templates (simple text, meeting
   invite, order confirmation), unchanged.
 
+  Phase 3b (this version, 0.5.0) surfaces email attachment METADATA
+  (filename, MIME, size, attachmentId, is_inline) into the four
+  read-side extracts (simple_text, meeting_invite,
+  order_confirmation, email_triage).  No bytes are fetched and no
+  new Gmail scope is required — the data is already present in the
+  existing users.messages.get full-format response.  See
+  kb/attachments.md for the trust contract.
+
 chat_tools:
   - tools.py
 
@@ -52,6 +60,11 @@ data_models:
   - EmailMarkReadResult
   - EmailDraftResult
   - EmailTriageExtract
+  # Phase 3b: sub-component carried inside the four read-side extracts
+  # above.  Not consumed standalone, but registered as its own kind so
+  # the dispatch loader can resolve the ``tuple[AttachmentMetadata, ...]``
+  # field annotations.
+  - AttachmentMetadata
 
 # Seven templates total: three Phase 1 read templates plus four
 # Phase 1.5 v2 write templates.  All seven share the canonical
@@ -130,6 +143,8 @@ kb_articles:
     path: kb/style.md
   - slug: email/inbound-triage
     path: kb/inbound-triage.md
+  - slug: email/attachments
+    path: kb/attachments.md
 
 # Phase 3a: in-process trigger that polls Gmail history every 15
 # minutes and emits one email.received event per newly-arrived

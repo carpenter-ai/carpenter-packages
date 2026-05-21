@@ -30,6 +30,7 @@ from typing import Any
 from .data_models import (
     EMAIL_TRIAGE_CATEGORIES,
     EMAIL_TRIAGE_FLAGS,
+    AttachmentMetadata,
     EmailArchiveResult,
     EmailDraftResult,
     EmailMarkReadResult,
@@ -186,6 +187,170 @@ def _check_flags(flags: tuple[str, ...]) -> str | None:
 
 
 # ---------------------------------------------------------------------------
+# Phase 3b: attachment-metadata checks
+# ---------------------------------------------------------------------------
+#
+# Filename sanitization is REJECTION-ONLY.  The REVIEWER copies the
+# Gmail-reported filename verbatim; the JUDGE either accepts it or
+# refuses to graduate that AttachmentMetadata entry.  No silent
+# rewrite — see D4 in /home/pi/notes/phase-3b-plan.md for why.
+
+_ATTACHMENT_SCHEMA_VERSION = "1.0"
+_MAX_ATTACHMENT_FILENAME = 128
+_MAX_ATTACHMENT_MIME = 128
+_MAX_ATTACHMENT_ID = 512
+_MAX_ATTACHMENT_SIZE_BYTES = 100 * 1024 * 1024  # 100 MiB
+_MAX_ATTACHMENTS = 32
+
+# Filename: any Unicode codepoint EXCEPT C0 control range (0x00-0x1f),
+# DEL (0x7f), forward slash, and backslash.  This is intentionally
+# permissive on Unicode letters / punctuation (international filenames
+# are legitimate); the BIDI-override codepoints are caught by the
+# dedicated _BIDI_OVERRIDES set below.
+_ATTACHMENT_NAME_RE = re.compile(r"^[^\x00-\x1f\x7f/\\]+$")
+
+# MIME type: ASCII-only, [type]/[subtype], each side bounded.  The
+# inbound side starts with a non-special char to ban leading dots and
+# leading slashes.
+_ATTACHMENT_MIME_RE = re.compile(
+    r"^[a-zA-Z0-9][a-zA-Z0-9._+-]{0,62}/[a-zA-Z0-9._+-]{1,62}$",
+)
+
+# Attachment id: Gmail's base64-url-safe-ish opaque token.  Loose
+# 5..512 envelope.
+_ATTACHMENT_ID_RE = re.compile(r"^[a-zA-Z0-9_-]{5,512}$")
+
+# Unicode bidirectional override codepoints.  These enable
+# "invoice.exe" -> visually rendering as "invoice.txt" attacks; even
+# though filename_clean is display-only, surfacing a misrepresented
+# extension to the user is exactly the kind of confusion the JUDGE
+# exists to prevent.  Reject any filename containing one.
+_BIDI_OVERRIDES = frozenset(
+    chr(c) for c in (
+        0x202A, 0x202B, 0x202C, 0x202D, 0x202E,  # LRE/RLE/PDF/LRO/RLO
+        0x2066, 0x2067, 0x2068, 0x2069,           # LRI/RLI/FSI/PDI
+    )
+)
+
+
+def _check_attachment_metadata(am: Any) -> str | None:
+    """Return ``None`` if ``am`` is a valid AttachmentMetadata, else a reason.
+
+    The JUDGE-dispatch wrapper does NOT pre-validate nested
+    dataclasses (AttachmentMetadata has zero PolicyLiteral fields),
+    so this handler does ALL of the structural work.
+    """
+    if not isinstance(am, AttachmentMetadata):
+        return f"attachment is not AttachmentMetadata: {type(am).__name__}"
+    if am.schema_version != _ATTACHMENT_SCHEMA_VERSION:
+        return (
+            f"attachment schema_version {am.schema_version!r} "
+            f"(expected {_ATTACHMENT_SCHEMA_VERSION!r})"
+        )
+    # Filename
+    fname = am.filename_clean
+    if not isinstance(fname, str):
+        return f"filename_clean is not a string: {type(fname).__name__}"
+    if not fname:
+        return "filename_clean is empty"
+    if len(fname) > _MAX_ATTACHMENT_FILENAME:
+        return (
+            f"filename_clean exceeds {_MAX_ATTACHMENT_FILENAME} chars "
+            f"({len(fname)})"
+        )
+    if _has_control_chars(fname):
+        return "filename_clean contains control characters"
+    if not _ATTACHMENT_NAME_RE.match(fname):
+        return (
+            "filename_clean contains a path separator or other banned "
+            "character"
+        )
+    if fname == "." or fname == "..":
+        return f"filename_clean {fname!r} is a path-traversal sequence"
+    for c in fname:
+        if c in _BIDI_OVERRIDES:
+            return (
+                "filename_clean contains a bidirectional override "
+                "codepoint"
+            )
+    # MIME
+    mime = am.claimed_mime_type
+    if not isinstance(mime, str):
+        return (
+            f"claimed_mime_type is not a string: {type(mime).__name__}"
+        )
+    if not mime:
+        return "claimed_mime_type is empty"
+    if len(mime) > _MAX_ATTACHMENT_MIME:
+        return (
+            f"claimed_mime_type exceeds {_MAX_ATTACHMENT_MIME} chars"
+        )
+    if not _ATTACHMENT_MIME_RE.match(mime):
+        return (
+            f"claimed_mime_type {mime!r} is not a valid type/subtype"
+        )
+    # Size — bool is a subclass of int, exclude explicitly.  Also exclude
+    # float / str.
+    size = am.size_bytes
+    if isinstance(size, bool) or not isinstance(size, int):
+        return f"size_bytes is not an int: {type(size).__name__}"
+    if size < 0:
+        return f"size_bytes is negative ({size})"
+    if size > _MAX_ATTACHMENT_SIZE_BYTES:
+        return (
+            f"size_bytes {size} exceeds {_MAX_ATTACHMENT_SIZE_BYTES} "
+            f"(100 MiB)"
+        )
+    # Attachment id
+    aid = am.attachment_id
+    if not isinstance(aid, str):
+        return f"attachment_id is not a string: {type(aid).__name__}"
+    if not aid:
+        return "attachment_id is empty"
+    if not _ATTACHMENT_ID_RE.match(aid):
+        return (
+            f"attachment_id {aid!r} does not match expected shape "
+            f"^[a-zA-Z0-9_-]{{5,512}}$"
+        )
+    # is_inline
+    if not isinstance(am.is_inline, bool):
+        return (
+            f"is_inline is not a bool: {type(am.is_inline).__name__}"
+        )
+    return None
+
+
+def _check_attachments_list(attachments: Any) -> str | None:
+    """Return ``None`` if ``attachments`` is a valid list, else a reason.
+
+    Enforces tuple-ness, length cap, per-entry validation, and no
+    duplicate ``attachment_id`` across entries.
+    """
+    if not isinstance(attachments, tuple):
+        return (
+            f"attachments is not a tuple: "
+            f"{type(attachments).__name__}"
+        )
+    if len(attachments) > _MAX_ATTACHMENTS:
+        return (
+            f"attachments has {len(attachments)} entries "
+            f"(max {_MAX_ATTACHMENTS})"
+        )
+    seen_ids: set[str] = set()
+    for i, am in enumerate(attachments):
+        err = _check_attachment_metadata(am)
+        if err:
+            return f"attachments[{i}]: {err}"
+        if am.attachment_id in seen_ids:
+            return (
+                f"attachments[{i}]: duplicate attachment_id "
+                f"{am.attachment_id!r}"
+            )
+        seen_ids.add(am.attachment_id)
+    return None
+
+
+# ---------------------------------------------------------------------------
 # Per-kind handlers
 # ---------------------------------------------------------------------------
 
@@ -219,6 +384,10 @@ def judge_simple_text(extract: Any) -> JudgeVerdict:
         return JudgeVerdict.reject(
             f"too many URLs ({len(extract.extracted_urls)} > {_MAX_URLS})",
         )
+    # Phase 3b: validate attachment metadata.
+    err = _check_attachments_list(extract.attachments)
+    if err:
+        return JudgeVerdict.reject(err)
     return JudgeVerdict.approve()
 
 
@@ -257,6 +426,10 @@ def judge_meeting_invite(extract: Any) -> JudgeVerdict:
         )
     if _has_control_chars(extract.location):
         return JudgeVerdict.reject("location contains control characters")
+    # Phase 3b: validate attachment metadata (typically the .ics part).
+    err = _check_attachments_list(extract.attachments)
+    if err:
+        return JudgeVerdict.reject(err)
     return JudgeVerdict.approve()
 
 
@@ -305,6 +478,10 @@ def judge_order_confirmation(extract: Any) -> JudgeVerdict:
             return JudgeVerdict.reject(
                 f"item {item[:32]!r} contains control characters",
             )
+    # Phase 3b: validate attachment metadata (typically a PDF invoice).
+    err = _check_attachments_list(extract.attachments)
+    if err:
+        return JudgeVerdict.reject(err)
     return JudgeVerdict.approve()
 
 
@@ -565,6 +742,10 @@ def judge_email_triage(extract: Any) -> JudgeVerdict:
                 f"importance_flag {fl!r} is duplicated",
             )
         seen_flags.add(fl)
+    # Phase 3b: validate attachment metadata.
+    err = _check_attachments_list(extract.attachments)
+    if err:
+        return JudgeVerdict.reject(err)
     return JudgeVerdict.approve()
 
 

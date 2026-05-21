@@ -19,6 +19,14 @@ Two flavours of extract are defined here:
   booleans).  No body or header content; the only attacker-controlled
   fields are opaque provider ids, which the JUDGE regex-bounds.
 
+Phase 3b adds an ``AttachmentMetadata`` dataclass and surfaces a
+``attachments: tuple[AttachmentMetadata, ...]`` field on every read
+extract plus the Phase 3a ``EmailTriageExtract``.  No bytes are
+fetched (the bytes-yet question is deferred to Phase 3c); only
+sender-claimed metadata — filename, MIME, size, attachment id,
+inline disposition — is graduated.  See ``kb/attachments.md`` for
+the trust contract.
+
 Trust-model rationale
 ---------------------
 
@@ -74,6 +82,62 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from carpenter_tools.policy.types import EmailPolicy, Url
+
+
+# ---------------------------------------------------------------------------
+# Phase 3b: attachment metadata (sub-component of read extracts)
+# ---------------------------------------------------------------------------
+#
+# The REVIEWER walks the untrusted Gmail message payload's ``parts``
+# tree and emits one ``AttachmentMetadata`` per part whose
+# ``body.attachmentId`` is present.  The JUDGE handler regex- and
+# bounds-checks each entry; on rejection, the entry does NOT graduate
+# but the parent extract's flags/importance_flags is annotated with
+# the literal ``"attachment_rejected"`` so the user can see that the
+# package suppressed something rather than the chat agent silently
+# under-reporting attachments.  See ``kb/attachments.md``.
+#
+# THE FIELDS ARE METADATA ONLY.  No bytes are fetched in Phase 3b;
+# ``attachment_id`` is opaque and the chat agent must treat
+# ``claimed_mime_type`` and ``size_bytes`` as advisory (sender-
+# claimed, not verified).  ``filename_clean`` is DISPLAY-ONLY — it
+# must never be used as a filesystem path component, URL segment,
+# archive entry name, or shell argument.
+
+
+@dataclass(frozen=True)
+class AttachmentMetadata:
+    """Sender-claimed metadata for one MIME part with an attachmentId.
+
+    Attributes:
+        filename_clean: The REVIEWER copies the part's ``filename``
+            header verbatim; the JUDGE REJECTS (does NOT silently
+            rewrite) entries that contain path separators, control
+            characters, or bidirectional override codepoints.  Max
+            128 chars.  Display-only.
+        claimed_mime_type: The part's ``mimeType`` value (sender-
+            claimed).  JUDGE bounds the shape (``a-zA-Z0-9._+-`` plus
+            a single ``/``).  Never use to dispatch handlers.
+        size_bytes: Gmail-reported decoded size (``body.size``).
+            JUDGE bounds to ``[0, 100 MiB]``.  Treat as advisory.
+        attachment_id: The opaque ``body.attachmentId`` Gmail returns.
+            JUDGE bounds shape ``[a-zA-Z0-9_-]{5,512}``.  The chat
+            agent must NOT parse it.  Phase 3b does not fetch the
+            bytes; this id is reserved for the future bytes path.
+        is_inline: ``True`` if any ``Content-Disposition`` header on
+            the part starts (case-insensitive) with ``"inline"``;
+            ``False`` otherwise (including the missing-header case,
+            which is treated conservatively as a real attachment).
+        schema_version: Always ``"1.0"`` in Phase 3b.  The JUDGE
+            rejects mismatches.
+    """
+
+    filename_clean: str = ""
+    claimed_mime_type: str = ""
+    size_bytes: int = 0
+    attachment_id: str = ""
+    is_inline: bool = False
+    schema_version: str = "1.0"
 
 
 # ---------------------------------------------------------------------------
@@ -177,8 +241,18 @@ class EmailSimpleTextExtract(_EmailExtractBase):
     extracted_urls: tuple[Url, ...] = ()
 
     # Subset of briefing.suspicious_keywords the REVIEWER thinks
-    # were present.  Free-form strings from a bounded list.
+    # were present.  Free-form strings from a bounded list.  Phase 3b
+    # may also append the literal ``"attachment_rejected"`` flag when
+    # the JUDGE dropped one or more malformed AttachmentMetadata
+    # entries from ``attachments``.
     flags: tuple[str, ...] = ()
+
+    # Phase 3b: sender-claimed attachment metadata.  Empty by default;
+    # the REVIEWER walks raw_email.payload.parts and populates this.
+    # Each entry passes ``_check_attachment_metadata`` in the JUDGE;
+    # rejected entries are dropped and the parent extract's ``flags``
+    # gains ``"attachment_rejected"`` (D4 risk #8 mitigation).
+    attachments: tuple["AttachmentMetadata", ...] = ()
 
 
 @dataclass(frozen=True)
@@ -206,8 +280,14 @@ class EmailMeetingInviteExtract(_EmailExtractBase):
     # The body summary, same constraints as SimpleText.
     body_summary: str = ""
 
-    # Suspicious keywords found.
+    # Suspicious keywords found.  Phase 3b may append
+    # ``"attachment_rejected"`` (see EmailSimpleTextExtract.flags note).
     flags: tuple[str, ...] = ()
+
+    # Phase 3b: attachment metadata (typically the .ics calendar
+    # invite plus any sender-included files).  Same trust contract as
+    # the EmailSimpleTextExtract field — see AttachmentMetadata.
+    attachments: tuple["AttachmentMetadata", ...] = ()
 
 
 @dataclass(frozen=True)
@@ -236,7 +316,13 @@ class EmailOrderConfirmationExtract(_EmailExtractBase):
 
     body_summary: str = ""
 
+    # Phase 3b may append ``"attachment_rejected"`` here too.
     flags: tuple[str, ...] = ()
+
+    # Phase 3b: attachment metadata (typically the PDF invoice
+    # attached to a vendor receipt).  Same trust contract as the
+    # EmailSimpleTextExtract field.
+    attachments: tuple["AttachmentMetadata", ...] = ()
 
 
 # ---------------------------------------------------------------------------
@@ -415,6 +501,12 @@ EMAIL_TRIAGE_FLAGS = (
     "automated",
     "personal",
     "suspicious_keyword",
+    # Phase 3b: appended by the JUDGE when one or more
+    # AttachmentMetadata entries were dropped from ``attachments``.
+    "attachment_rejected",
+    # Phase 3b: appended when the source message had more than 32
+    # attachment parts and only the first 32 graduated.
+    "too_many_attachments",
 )
 
 
@@ -440,7 +532,16 @@ class EmailTriageExtract:
             the ONLY free-form string field; it MUST be a stripped form
             the REVIEWER produced, not a verbatim header.
         importance_flags: Tuple of zero or more flags drawn from
-            :data:`EMAIL_TRIAGE_FLAGS`.
+            :data:`EMAIL_TRIAGE_FLAGS`.  Phase 3b may additionally
+            append the literal ``"attachment_rejected"`` flag when the
+            JUDGE dropped one or more malformed AttachmentMetadata
+            entries from ``attachments`` (D4 risk #8 mitigation), or
+            ``"too_many_attachments"`` when the source message had
+            more than 32 attachment parts.
+        attachments: Phase 3b — sender-claimed metadata for each MIME
+            part with an attachmentId.  See
+            :class:`AttachmentMetadata`.  Empty by default; bounded to
+            32 entries by the JUDGE.
         schema_version: Schema version (the JUDGE rejects mismatches).
     """
 
@@ -452,4 +553,5 @@ class EmailTriageExtract:
     )
     subject_clean: str = ""
     importance_flags: tuple[str, ...] = ()
+    attachments: tuple["AttachmentMetadata", ...] = ()
     schema_version: str = "1.0"

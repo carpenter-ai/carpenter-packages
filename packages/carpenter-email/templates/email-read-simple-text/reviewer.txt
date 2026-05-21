@@ -40,6 +40,39 @@ The dataclass fields are:
   - flags: the subset of briefing.suspicious_keywords whose text
     appears in the message subject or body, case-insensitive.  AT
     MOST 16 entries.  Do not invent flags that are not in the list.
+    If you DROP any AttachmentMetadata entry below because it looked
+    malformed (e.g. filename containing "/" or control chars), also
+    append the literal string "attachment_rejected" to flags so the
+    chat agent can surface the suppression honestly.  If the message
+    has more than 32 attachment parts, append "too_many_attachments".
+  - attachments: a tuple of AttachmentMetadata entries (see
+    ATTACHMENTS section below).  AT MOST 32 entries.  Empty tuple
+    if the message has no attachment parts.
+
+ATTACHMENTS
+-----------
+Walk raw_email "payload.parts" recursively.  For each part where
+"body.attachmentId" is present and non-empty (NOT for parts whose
+body is inline-encoded `body.data`):
+  - filename_clean: copy "filename" header value verbatim.  Do NOT
+    sanitize — the JUDGE will reject malformed entries.  If
+    "filename" is absent or empty, set to "" and the JUDGE will
+    reject (no nameless attachments graduate).
+  - claimed_mime_type: copy "mimeType" verbatim.
+  - size_bytes: copy "body.size" as integer.
+  - attachment_id: copy "body.attachmentId" verbatim.
+  - is_inline: True if any "Content-Disposition" header on this part
+    starts (case-insensitive) with "inline".  Otherwise False.
+
+AT MOST 32 attachments per message.  If the message has more, copy
+the first 32 in document order and add the flag "too_many_attachments"
+to the extract's `flags` field.
+
+You MUST NOT include any text from the email body or headers (other
+than the per-part filename / mimeType / Content-Disposition values
+listed above) inside an AttachmentMetadata entry.  Each field is
+copied verbatim from a single named MIME header / body field; no
+free-form summarization.
 
 RULES
 -----
