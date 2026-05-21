@@ -368,3 +368,88 @@ class EmailDraftResult:
     draft_id: str = ""
     to_addresses: tuple[EmailPolicy, ...] = ()
     schema_version: str = "1.0"
+
+
+# ---------------------------------------------------------------------------
+# Phase 3a inbound-triage extract (REVIEWER -> JUDGE, pending until JUDGE approves)
+# ---------------------------------------------------------------------------
+#
+# Emitted by the ``email_triage`` template that the ``gmail_poll`` trigger
+# fans out for each newly-arrived message.  REVIEWER reads briefing +
+# untrusted raw Gmail JSON; it derives EXACTLY one of these dataclasses
+# (no body, no from-string, no subject content beyond a sanitized
+# stripped form).  JUDGE bounds every field; the chat agent only ever
+# sees the validated, typed extract.
+#
+# Trust contract (parallels Phase 1.5 v2 write-receipt model):
+#
+# * ``category`` is the Literal-typed classification.  REVIEWER picks
+#   from a closed enumeration; JUDGE re-validates against the same
+#   list so a smuggled value rejects.
+# * ``from_address`` is an ``EmailPolicy`` — the dispatch wrapper
+#   validates allowlist membership before our JUDGE handler runs.  The
+#   JUDGE only confirms non-empty + control-free.
+# * ``subject_clean`` is the ONLY free-form string field.  It is the
+#   sanitized stripped form (control chars stripped; length bounded;
+#   URLs forbidden in the prompt); JUDGE enforces the same constraints
+#   plus a stricter URL ban.  No raw body, no raw subject, no headers
+#   beyond from + sanitized-subject ever leave the JUDGE gate.
+# * ``importance_flags`` is a bounded tuple of strings drawn from a
+#   closed enum (``high_priority``, ``newsletter``, ``promotional``,
+#   ``automated``, ``personal``, ``suspicious_keyword``).  JUDGE rejects
+#   any unknown flag.
+
+EMAIL_TRIAGE_CATEGORIES = (
+    "personal",
+    "transactional",
+    "newsletter",
+    "promotional",
+    "automated",
+    "unknown",
+)
+
+EMAIL_TRIAGE_FLAGS = (
+    "high_priority",
+    "newsletter",
+    "promotional",
+    "automated",
+    "personal",
+    "suspicious_keyword",
+)
+
+
+@dataclass(frozen=True)
+class EmailTriageExtract:
+    """Inbound-email triage extract emitted by the ``email_triage`` template.
+
+    Phase 3a v1 surfaces this directly to chat-notify; later phases may
+    fan a second pass into the per-kind read extracts (simple_text /
+    meeting_invite / order_confirmation).  Field shapes are minimal by
+    design — see the module docstring's trust-contract notes.
+
+    Attributes:
+        provider_message_id: Opaque Gmail message id (JUDGE regex-bounds).
+        received_history_id: The Gmail ``historyId`` watermark that
+            surfaced this message.  Opaque string; JUDGE bounds shape.
+        category: One of :data:`EMAIL_TRIAGE_CATEGORIES`.  REVIEWER
+            picks the best fit; JUDGE re-validates.
+        from_address: Sender email, allowlist-validated by the dispatch
+            wrapper before JUDGE runs.
+        subject_clean: Sanitized subject form.  Control chars stripped,
+            length-bounded (max 200 chars), URLs forbidden.  This is
+            the ONLY free-form string field; it MUST be a stripped form
+            the REVIEWER produced, not a verbatim header.
+        importance_flags: Tuple of zero or more flags drawn from
+            :data:`EMAIL_TRIAGE_FLAGS`.
+        schema_version: Schema version (the JUDGE rejects mismatches).
+    """
+
+    provider_message_id: str = ""
+    received_history_id: str = ""
+    category: str = "unknown"
+    from_address: EmailPolicy = field(
+        default_factory=lambda: EmailPolicy(""),
+    )
+    subject_clean: str = ""
+    importance_flags: tuple[str, ...] = ()
+    schema_version: str = "1.0"

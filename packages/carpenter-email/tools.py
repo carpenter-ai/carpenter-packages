@@ -317,6 +317,230 @@ def _create_read_arc_tree(
     return {"arc_id": parent_id}
 
 
+def _create_triage_arc_tree(
+    *,
+    provider_message_id: str,
+    received_history_id: str,
+    expected_account_email: str,
+) -> dict:
+    """Spin up the ``email_triage`` arc tree for one inbound message.
+
+    Mirrors :func:`_create_read_arc_tree` exactly except:
+
+    * The template name is ``email_triage``.
+    * The REVIEWER's extract_kind is ``EmailTriageExtract``.
+    * The PLANNER goal mentions the inbound-triage context (no chat
+      goal text — this is a trigger-driven pipeline; the chat agent
+      is notified only after arc completion).
+
+    Returns ``{"arc_id": <parent_planner_id>}`` on success or
+    ``{"error": ...}`` on failure.  Called from the package's
+    ``email.received`` subscription handler.
+    """
+    from carpenter.core.arcs import manager as _am
+    from carpenter.core.engine import work_queue as _wq
+    from carpenter.core.resources import (
+        create_resource as _create_resource,
+        derive_resource as _derive_resource,
+        link_arc_resource as _link_arc_resource,
+        resource_storage_path as _resource_storage_path,
+    )
+    from carpenter.core.workflows._arc_state import set_arc_state
+    from carpenter.db import db_transaction as _db_transaction
+    from carpenter.tool_backends import arc as arc_backend
+
+    from .scripts import GMAIL_FETCH_SCRIPT
+
+    template_name = "email_triage"
+    extract_kind = "EmailTriageExtract"
+
+    parent_id = _am.create_arc(
+        name=f"Email triage: {provider_message_id[:16]}",
+        goal=(
+            "Construct an EmailReviewBriefing dataclass from the "
+            "global SecurityPolicies.email allowlist snapshot and "
+            "the package's static suspicious-keyword list, then "
+            "derive_resource(kind='EmailReviewBriefing', "
+            "verdict='approved') as a born-trusted Resource.  The "
+            "EXECUTOR child has been pre-seeded with the inbound "
+            "provider_message_id; the REVIEWER child will read the "
+            "briefing + raw email JSON and emit one EmailTriageExtract; "
+            "the JUDGE is deterministic Python (no agent input needed)."
+        ),
+        agent_type="PLANNER",
+    )
+    _am.update_status(parent_id, "active")
+
+    batch_result = arc_backend.handle_create_batch({
+        "arcs": [
+            {
+                "name": (
+                    f"Triage-fetch Gmail message {provider_message_id[:16]}"
+                ),
+                "goal": (
+                    "Submit this EXACT code via submit_code (do not "
+                    "modify it):\n```python\n"
+                    + GMAIL_FETCH_SCRIPT
+                    + "```\nAll inputs (provider_message_id, "
+                    "raw_resource_path, raw_resource_id) have been "
+                    "pre-seeded in arc state."
+                ),
+                "parent_id": parent_id,
+                "integrity_level": "untrusted",
+                "output_type": "json",
+                "agent_type": "EXECUTOR",
+                "step_order": 0,
+            },
+            {
+                "name": "Triage-review and emit extract",
+                "goal": (
+                    "Read the briefing Resource and the raw_email "
+                    "Resource (paths in arc state under "
+                    "'briefing_resource_id' and 'raw_resource_path'). "
+                    "Follow the static REVIEWER prompt shipped with "
+                    "the email_triage template.  Emit exactly one "
+                    "EmailTriageExtract via derive_resource.  Then "
+                    "exit — the deterministic JUDGE will validate "
+                    "and graduate."
+                ),
+                "parent_id": parent_id,
+                "agent_type": "REVIEWER",
+                "integrity_level": "trusted",
+                "reviewer_profile": "security-reviewer",
+                "model_policy": "careful-coding",
+                "step_order": 1,
+            },
+            {
+                "name": "Judge triage extract",
+                "goal": (
+                    "JUDGE: validate the REVIEWER's EmailTriageExtract "
+                    "Resource.  Call resource.submit_verdict with the "
+                    "extract's resource_id (in arc state under "
+                    "'_review_target_resource_id') and "
+                    "verdict='approved' or 'rejected' based on the "
+                    "package's deterministic JUDGE handler "
+                    "(judge_email_triage, auto-dispatched by the "
+                    "platform via _try_package_judge)."
+                ),
+                "parent_id": parent_id,
+                "agent_type": "JUDGE",
+                "integrity_level": "trusted",
+                "reviewer_profile": "judge",
+                "step_order": 2,
+            },
+        ],
+    })
+    if "error" in batch_result:
+        try:
+            _am.update_status(parent_id, "failed")
+        except Exception:  # noqa: BLE001
+            pass
+        return {"error": batch_result["error"]}
+
+    child_ids = batch_result["arc_ids"]
+    executor_arc_id, reviewer_arc_id, judge_arc_id = child_ids[:3]
+
+    # Resource wiring: raw_email (untrusted) + briefing (born-trusted)
+    # + extract (pending).  See _create_read_arc_tree for invariants.
+    raw_resource_id = _create_resource(
+        content_type="json",
+        file_path=None,
+        produced_by_arc_id=executor_arc_id,
+        source_descriptor=f"gmail:{provider_message_id}",
+    )
+    raw_path = _resource_storage_path(raw_resource_id, "blob")
+    raw_path.parent.mkdir(parents=True, exist_ok=True)
+    with _db_transaction() as _db:
+        _db.execute(
+            "UPDATE resources SET file_path = ? WHERE id = ?",
+            (str(raw_path), raw_resource_id),
+        )
+    _link_arc_resource(
+        arc_id=executor_arc_id, resource_id=raw_resource_id, role="output",
+    )
+
+    briefing_resource_id = _derive_resource(
+        content_type="dataclass",
+        file_path=None,
+        produced_by_arc_id=parent_id,
+        produced_by_template=template_name,
+        template_verdict="approved",
+        source_descriptor=f"briefing:{template_name}",
+    )
+    briefing_path = _resource_storage_path(briefing_resource_id, "blob")
+    briefing_path.parent.mkdir(parents=True, exist_ok=True)
+    with _db_transaction() as _db:
+        _db.execute(
+            "UPDATE resources SET file_path = ? WHERE id = ?",
+            (str(briefing_path), briefing_resource_id),
+        )
+
+    extract_resource_id = _derive_resource(
+        content_type="dataclass",
+        file_path=None,
+        produced_by_arc_id=reviewer_arc_id,
+        produced_by_template=template_name,
+        template_verdict="pending",
+        source_descriptor=f"extract:{provider_message_id}",
+    )
+    extract_path = _resource_storage_path(extract_resource_id, "blob")
+    extract_path.parent.mkdir(parents=True, exist_ok=True)
+    with _db_transaction() as _db:
+        _db.execute(
+            "UPDATE resources SET file_path = ? WHERE id = ?",
+            (str(extract_path), extract_resource_id),
+        )
+
+    _link_arc_resource(
+        arc_id=reviewer_arc_id,
+        resource_id=briefing_resource_id,
+        role="input",
+    )
+    _link_arc_resource(
+        arc_id=reviewer_arc_id,
+        resource_id=raw_resource_id,
+        role="input",
+    )
+    _link_arc_resource(
+        arc_id=reviewer_arc_id,
+        resource_id=extract_resource_id,
+        role="output",
+    )
+
+    # Pre-seed arc state.
+    set_arc_state(executor_arc_id, "provider_message_id", provider_message_id)
+    set_arc_state(executor_arc_id, "raw_resource_path", str(raw_path))
+    set_arc_state(executor_arc_id, "raw_resource_id", raw_resource_id)
+
+    set_arc_state(parent_id, "expected_account_email", expected_account_email)
+    set_arc_state(parent_id, "briefing_resource_id", briefing_resource_id)
+    set_arc_state(parent_id, "_primary_resource_id", extract_resource_id)
+    set_arc_state(parent_id, "template_name", template_name)
+    set_arc_state(parent_id, "extract_kind", extract_kind)
+    # Surface the watermark on the parent so future arc-tree introspection
+    # tools can correlate triage arcs back to a Gmail history cursor.
+    set_arc_state(parent_id, "received_history_id", received_history_id)
+
+    set_arc_state(reviewer_arc_id, "briefing_resource_id", briefing_resource_id)
+    set_arc_state(reviewer_arc_id, "raw_resource_path", str(raw_path))
+    set_arc_state(reviewer_arc_id, "raw_resource_id", raw_resource_id)
+    set_arc_state(reviewer_arc_id, "extract_resource_id", extract_resource_id)
+    set_arc_state(reviewer_arc_id, "extract_kind", extract_kind)
+    set_arc_state(reviewer_arc_id, "template_name", template_name)
+
+    set_arc_state(
+        judge_arc_id, "_review_target_resource_id", extract_resource_id,
+    )
+    set_arc_state(judge_arc_id, "extract_resource_id", extract_resource_id)
+
+    _wq.enqueue(
+        "arc.dispatch",
+        {"arc_id": executor_arc_id},
+        idempotency_key=f"arc_dispatch:{executor_arc_id}",
+    )
+    return {"arc_id": parent_id}
+
+
 # ---------------------------------------------------------------------------
 # Authorization
 # ---------------------------------------------------------------------------

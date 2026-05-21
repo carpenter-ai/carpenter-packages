@@ -1,0 +1,58 @@
+name: email_triage
+description: |
+  Inbound-email triage pipeline (Phase 3a).  Invoked by the package's
+  ``email.received`` subscription handler when the GmailPollTrigger
+  flags a newly-arrived message.  The pipeline fetches the message
+  through the same untrusted-Gmail EXECUTOR shape used by the read
+  templates, then a constrained REVIEWER derives one
+  ``EmailTriageExtract`` (category + sanitised subject + flags) which a
+  deterministic Python JUDGE bounds before graduation.
+
+  Crucially the REVIEWER ships a STATIC prompt (``reviewer.txt``) with
+  no KB access and no tools beyond ``read_resource`` /
+  ``derive_resource`` — the load-bearing security property for I3 is
+  that REVIEWER cannot smuggle raw Gmail body / subject / from-string
+  into the extract.  JUDGE re-validates.
+steps:
+  - name: prepare-briefing
+    description: |
+      Construct EmailReviewBriefing from the global SecurityPolicies.email
+      allowlist snapshot and the static suspicious-keyword list.  Then
+      derive_resource it as born-trusted.  Trusted PLANNER context.
+    order: 0
+    agent_type: PLANNER
+    model_policy: fast-chat
+  - name: fetch-message
+    description: |
+      Untrusted EXECUTOR step.  Submits the pre-verified Gmail fetch
+      script, which reads provider_message_id / raw_resource_path /
+      raw_resource_id from arc state, performs the GET via the
+      gmail.googleapis.com allowlisted domain, and writes the raw
+      JSON to the raw Resource blob.  No KB access; egress restricted
+      to gmail.googleapis.com / oauth2.googleapis.com.
+    order: 1
+    agent_type: EXECUTOR
+    integrity_level: untrusted
+    model_policy: background-batch
+  - name: triage-review
+    description: |
+      Constrained REVIEWER step with a static prompt shipped from the
+      package (reviewer.txt).  Reads briefing + raw_email; writes one
+      pending EmailTriageExtract Resource via derive_resource.  No KB
+      access.  The REVIEWER is forbidden by the static prompt from
+      copying subject, from, snippet, or body content verbatim into
+      the extract — only the closed-enum classification fields and a
+      sanitised subject form.
+    order: 2
+    agent_type: REVIEWER
+    model_policy: careful-coding
+    arc_role: verifier
+  - name: judge-triage
+    description: |
+      Deterministic JUDGE step — handled by the platform's
+      ``_try_package_judge`` dispatch, which loads the extract
+      Resource bytes, deserialises into EmailTriageExtract, validates
+      every PolicyLiteral field against SecurityPolicies, and calls
+      ``judges:judge_email_triage``.  No AI agent.
+    order: 3
+    agent_type: JUDGE

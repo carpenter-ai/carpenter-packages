@@ -28,6 +28,8 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .data_models import (
+    EMAIL_TRIAGE_CATEGORIES,
+    EMAIL_TRIAGE_FLAGS,
     EmailArchiveResult,
     EmailDraftResult,
     EmailMarkReadResult,
@@ -35,6 +37,7 @@ from .data_models import (
     EmailOrderConfirmationExtract,
     EmailSendResult,
     EmailSimpleTextExtract,
+    EmailTriageExtract,
 )
 
 # We import the extract dataclasses via the package-relative path so
@@ -436,6 +439,132 @@ def judge_email_send(extract: Any) -> JudgeVerdict:
     )
     if err:
         return JudgeVerdict.reject(err)
+    return JudgeVerdict.approve()
+
+
+# ---------------------------------------------------------------------------
+# Phase 3a inbound-triage JUDGE
+# ---------------------------------------------------------------------------
+#
+# The ``email_triage`` template's REVIEWER reads briefing + untrusted Gmail
+# JSON and derives exactly one ``EmailTriageExtract``.  The JUDGE below
+# enforces:
+#
+# * Dataclass type identity (belt-and-braces).
+# * Schema version match.
+# * ``category`` is in the closed enum ``EMAIL_TRIAGE_CATEGORIES``.
+# * ``from_address`` is non-empty (dispatch wrapper already allowlist-
+#   validated).
+# * ``provider_message_id`` matches the opaque-id shape.
+# * ``received_history_id`` is a bounded opaque string.
+# * ``subject_clean`` is length-bounded, control-free, and contains no
+#   URL substring (the REVIEWER must have stripped them; a hostile
+#   REVIEWER smuggling URLs through this field is what this gate exists
+#   to catch — see I3 in the trust-invariant audit).
+# * ``importance_flags`` is a bounded tuple of strings drawn from the
+#   closed enum ``EMAIL_TRIAGE_FLAGS``.
+
+_MAX_TRIAGE_SUBJECT = 200
+_MAX_TRIAGE_FLAGS = 8
+_HISTORY_ID_RE = re.compile(r"^[0-9]{1,32}$")
+# Cheap URL/scheme sniffer.  Matches the canonical http(s):// + bare
+# ``www.`` prefix + ``://`` segment.  REVIEWER-emitted subject_clean
+# is supposed to omit URLs entirely; we re-check here.
+_URL_SUBSTR_RE = re.compile(
+    r"(?i)\b(?:https?://|www\.[a-z0-9-]|ftp://|://)",
+)
+
+
+def judge_email_triage(extract: Any) -> JudgeVerdict:
+    """JUDGE for ``email_triage``.
+
+    The trust-graduation gate between an untrusted Gmail message
+    fetched by the polling pipeline and the chat-notify path.  Approves
+    only if every field passes the closed-enum / length / shape checks
+    above.
+
+    The REVIEWER's static prompt forbids copying subject / from /
+    snippet verbatim into the extract; this handler re-checks the
+    derivable parts.  Subject is length-bounded, control-free, and
+    URL-free — three properties that compose to "won't smuggle a
+    payload from an attacker-controlled Gmail message through chat".
+    """
+    if not isinstance(extract, EmailTriageExtract):
+        return JudgeVerdict.reject(
+            f"expected EmailTriageExtract, got {type(extract).__name__}",
+        )
+    err = _check_write_schema_version(extract.schema_version)
+    if err:
+        return JudgeVerdict.reject(err)
+    if extract.category not in EMAIL_TRIAGE_CATEGORIES:
+        return JudgeVerdict.reject(
+            f"category {extract.category!r} is not in the closed enum "
+            f"{sorted(EMAIL_TRIAGE_CATEGORIES)}",
+        )
+    err = _check_expected_account(extract.from_address)
+    if err:
+        # _check_expected_account is named for the write path; semantics
+        # apply identically — non-empty + control-free.  Rewrite the
+        # field name in the reason for log clarity.
+        return JudgeVerdict.reject(
+            err.replace("expected_account_email", "from_address"),
+        )
+    err = _check_provider_message_id(extract.provider_message_id)
+    if err:
+        return JudgeVerdict.reject(err)
+    # received_history_id is an opaque numeric string (Gmail returns
+    # decimal historyIds).  Bound shape so a hostile script cannot
+    # smuggle a payload through it.
+    hid = extract.received_history_id
+    if not isinstance(hid, str) or not _HISTORY_ID_RE.match(hid):
+        return JudgeVerdict.reject(
+            f"received_history_id {hid!r} must match ^[0-9]{{1,32}}$",
+        )
+    subj = extract.subject_clean
+    if not isinstance(subj, str):
+        return JudgeVerdict.reject(
+            f"subject_clean is not a string: {type(subj).__name__}",
+        )
+    if len(subj) > _MAX_TRIAGE_SUBJECT:
+        return JudgeVerdict.reject(
+            f"subject_clean exceeds {_MAX_TRIAGE_SUBJECT} chars "
+            f"({len(subj)})",
+        )
+    if _has_control_chars(subj):
+        return JudgeVerdict.reject(
+            "subject_clean contains control characters",
+        )
+    if _URL_SUBSTR_RE.search(subj):
+        return JudgeVerdict.reject(
+            "subject_clean contains a URL-like substring; REVIEWER must "
+            "strip URLs from the sanitised subject",
+        )
+    flags = extract.importance_flags
+    if not isinstance(flags, tuple):
+        return JudgeVerdict.reject(
+            f"importance_flags is not a tuple: {type(flags).__name__}",
+        )
+    if len(flags) > _MAX_TRIAGE_FLAGS:
+        return JudgeVerdict.reject(
+            f"importance_flags has {len(flags)} entries "
+            f"(max {_MAX_TRIAGE_FLAGS})",
+        )
+    seen_flags: set[str] = set()
+    for fl in flags:
+        if not isinstance(fl, str):
+            return JudgeVerdict.reject(
+                f"importance_flag {fl!r} is not a string",
+            )
+        if fl not in EMAIL_TRIAGE_FLAGS:
+            return JudgeVerdict.reject(
+                f"importance_flag {fl!r} is not in the closed enum "
+                f"{sorted(EMAIL_TRIAGE_FLAGS)}",
+            )
+        if fl in seen_flags:
+            return JudgeVerdict.reject(
+                f"importance_flag {fl!r} is duplicated",
+            )
+        seen_flags.add(fl)
     return JudgeVerdict.approve()
 
 
