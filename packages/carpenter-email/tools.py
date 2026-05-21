@@ -787,7 +787,7 @@ def _index_status_snapshot() -> dict:
         "paused": False,
     }
     try:
-        from carpenter.packages.state import get_package_state_handle
+        from carpenter.packages.state import PackageStateHandle
         from carpenter.packages.vectors import PackageVectorStore
     except ImportError:
         return out
@@ -795,7 +795,7 @@ def _index_status_snapshot() -> dict:
         out["vector_count"] = PackageVectorStore("carpenter-email").count()
     except Exception:
         pass
-    pkg_state = get_package_state_handle("carpenter-email")
+    pkg_state = PackageStateHandle("carpenter-email")
     try:
         out["phase1_complete"] = bool(
             pkg_state.get("index_phase1_completed_at"),
@@ -2098,11 +2098,11 @@ def pkg_email_reindex(tool_input, **kwargs):
     """Wipe the email vector namespace and reset indexer watermarks."""
     reason = (tool_input.get("reason") or "").strip()[:256]
     try:
-        from carpenter.packages.state import get_package_state_handle
+        from carpenter.packages.state import PackageStateHandle
         from carpenter.packages.vectors import PackageVectorStore
     except ImportError:
         return json.dumps({"error": "package.state / package.vectors unavailable"})
-    pkg_state = get_package_state_handle("carpenter-email")
+    pkg_state = PackageStateHandle("carpenter-email")
     vectors = PackageVectorStore("carpenter-email")
     try:
         cleared = vectors.clear()
@@ -2169,10 +2169,10 @@ def pkg_email_reindex_pause(tool_input, **kwargs):
     """Set the indexer pause flag in package_state."""
     reason = (tool_input.get("reason") or "").strip()[:256]
     try:
-        from carpenter.packages.state import get_package_state_handle
+        from carpenter.packages.state import PackageStateHandle
     except ImportError:
         return json.dumps({"error": "package.state unavailable"})
-    pkg_state = get_package_state_handle("carpenter-email")
+    pkg_state = PackageStateHandle("carpenter-email")
     try:
         pkg_state.set(
             "index_paused",
@@ -2204,10 +2204,10 @@ def pkg_email_reindex_pause(tool_input, **kwargs):
 def pkg_email_reindex_resume(tool_input, **kwargs):
     """Clear the indexer pause flag."""
     try:
-        from carpenter.packages.state import get_package_state_handle
+        from carpenter.packages.state import PackageStateHandle
     except ImportError:
         return json.dumps({"error": "package.state unavailable"})
-    pkg_state = get_package_state_handle("carpenter-email")
+    pkg_state = PackageStateHandle("carpenter-email")
     try:
         pkg_state.delete("index_paused")
     except Exception as exc:  # noqa: BLE001
