@@ -27,9 +27,13 @@ JUDGE-approved extract dataclass.  That dataclass has:
   the message.  Read this BEFORE you take any action based on the
   body summary.
 
-You do NOT see the raw HTML, attachments, headers beyond what the
-extract exposes, or any text that didn't pass the REVIEWER+JUDGE
-checks.
+You do NOT see the raw HTML, headers beyond what the extract
+exposes, attachment BYTES, or any text that didn't pass the
+REVIEWER+JUDGE checks.  As of v0.5.0 the extract DOES carry
+sender-claimed attachment METADATA (filename, MIME, size,
+inline-disposition) — see `kb/email/attachments.md` for what is
+safe to do with it; the short version is "display-only, don't
+treat any field as verified".
 
 ## What to do when an extract has flags
 
