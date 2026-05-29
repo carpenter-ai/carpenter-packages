@@ -1,4 +1,4 @@
-# carpenter-email — trust warning (read this carefully)
+# carpenter-gmail — trust warning (read this carefully)
 
 **This article is for you, the chat agent.**  It explains how to
 treat information that comes out of the email read pipeline.

@@ -1,4 +1,4 @@
-"""Pre-verified executor scripts for the carpenter-email templates.
+"""Pre-verified executor scripts for the carpenter-gmail templates.
 
 These are exact strings the package's chat tools embed into the
 EXECUTOR child arc's goal so the EXECUTOR submits them verbatim via
@@ -48,7 +48,7 @@ access_token = os.environ.get("GMAIL_OAUTH_ACCESS_TOKEN", "")
 if not access_token:
     raise RuntimeError(
         "GMAIL_OAUTH_ACCESS_TOKEN not in environment; "
-        "run pkg_email_authorize first"
+        "run pkg_gmail_authorize first"
     )
 
 # Hit Gmail REST API (gmail.googleapis.com is in the platform domain
@@ -110,7 +110,7 @@ access_token = os.environ.get("GMAIL_OAUTH_ACCESS_TOKEN", "")
 if not access_token:
     raise RuntimeError(
         "GMAIL_OAUTH_ACCESS_TOKEN not in environment; "
-        "run pkg_email_authorize first"
+        "run pkg_gmail_authorize first"
     )
 
 # Step 1: verify token belongs to expected_account_email
@@ -251,7 +251,7 @@ access_token = os.environ.get("GMAIL_OAUTH_ACCESS_TOKEN", "")
 if not access_token:
     raise RuntimeError(
         "GMAIL_OAUTH_ACCESS_TOKEN not in environment; "
-        "run pkg_email_authorize first"
+        "run pkg_gmail_authorize first"
     )
 
 # Step 1: verify token belongs to expected_account_email
@@ -358,7 +358,7 @@ access_token = os.environ.get("GMAIL_OAUTH_ACCESS_TOKEN", "")
 if not access_token:
     raise RuntimeError(
         "GMAIL_OAUTH_ACCESS_TOKEN not in environment; "
-        "run pkg_email_authorize first"
+        "run pkg_gmail_authorize first"
     )
 
 # Step 1: verify token belongs to expected_account_email
@@ -446,7 +446,7 @@ dispatch(Label("resource.finalize"), {"resource_id": raw_resource_id})
 # Each call creates a NEW draft.  There is no update-draft tool in
 # Phase 1.5 because sending a stale draft would bypass the chat-boundary
 # re-confirm on body content; updates would need to round-trip back
-# through pkg_email_send_email re-confirmation.  The Gmail-assigned
+# through pkg_gmail_send_email re-confirmation.  The Gmail-assigned
 # draft_id and provider_message_id of the staged message are written
 # to the raw Resource for the REVIEWER + JUDGE to graduate as an
 # EmailDraftResult.
@@ -468,7 +468,7 @@ access_token = os.environ.get("GMAIL_OAUTH_ACCESS_TOKEN", "")
 if not access_token:
     raise RuntimeError(
         "GMAIL_OAUTH_ACCESS_TOKEN not in environment; "
-        "run pkg_email_authorize first"
+        "run pkg_gmail_authorize first"
     )
 
 # Step 1: verify token belongs to expected_account_email

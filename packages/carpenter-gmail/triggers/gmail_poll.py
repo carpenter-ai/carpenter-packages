@@ -1,4 +1,4 @@
-"""Gmail history-list polling trigger (carpenter-email, Phase 3a PR-C).
+"""Gmail history-list polling trigger (carpenter-gmail, Phase 3a PR-C).
 
 Periodically polls the Gmail ``users.history.list`` API for new
 inbound messages and emits one ``email.received`` event per newly-seen
@@ -31,7 +31,7 @@ Design notes (cross-reference :mod:`carpenter.notes.phase-3a-plan`):
   the trigger in-process for the rest of the daemon's lifetime (until
   the operator re-authorises and restarts).  A persistent flag would
   be wrong here — the operator typically restarts the daemon after
-  re-running ``pkg_email_authorize``.
+  re-running ``pkg_gmail_authorize``.
 * **HTTP 429 / 5xx**: store a ``gmail_poll_backoff_until`` ISO timestamp
   via ``package_state``; skip the poll until elapsed.
 
@@ -59,7 +59,7 @@ from carpenter.core.engine.triggers.base import PollableTrigger
 logger = logging.getLogger(__name__)
 
 
-# Package state keys.  Held under the carpenter-email PackageStateHandle.
+# Package state keys.  Held under the carpenter-gmail PackageStateHandle.
 _KEY_HISTORY_ID = "history_id"
 _KEY_BACKOFF_UNTIL = "gmail_poll_backoff_until"
 _KEY_POLL_IN_PROGRESS = "gmail_poll_in_progress"
@@ -198,7 +198,7 @@ class GmailPollTrigger(PollableTrigger):
         self.event_type = str(config.get("event_type", "email.received"))
         # State that does NOT persist (intentional): set on auth revoke
         # so we stop polling until restart.  Operator workflow is:
-        # re-run pkg_email_authorize, restart the daemon.  A persistent
+        # re-run pkg_gmail_authorize, restart the daemon.  A persistent
         # flag would risk skipping polls after a successful re-auth.
         self._disabled_in_process = False
         # Heartbeat cadence guard — the heartbeat loop calls check()

@@ -1,8 +1,8 @@
-# carpenter-email — outbound writing style
+# carpenter-gmail — outbound writing style
 
 This article tells the **trusted chat agent** how the user prefers
 their outbound email to be composed.  It is read by the agent when
-preparing the `body` argument for `pkg_email_send_email`; it is
+preparing the `body` argument for `pkg_gmail_send_email`; it is
 NEVER read by the REVIEWER (the REVIEWER has no KB access by
 design).
 

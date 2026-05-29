@@ -1,6 +1,6 @@
 name: email_index_phase2
 description: |
-  Phase 2 of the carpenter-email semantic resource index (Phase 4 PR-A).
+  Phase 2 of the carpenter-gmail semantic resource index (Phase 4 PR-A).
   Re-indexes message bodies for a pre-seeded list of provider message
   ids (typically the top-N already-indexed messages, in batches of
   <=50).  Phase 2 enriches the existing vector entries with body
@@ -25,7 +25,7 @@ steps:
   - name: fetch-batch
     description: |
       Untrusted EXECUTOR step.  Submits the pre-verified Phase 2 Gmail
-      fetch script (carpenter_email.scripts.GMAIL_INDEX_PHASE2_SCRIPT)
+      fetch script (carpenter_gmail.scripts.GMAIL_INDEX_PHASE2_SCRIPT)
       verbatim via submit_code.  The script reads the message-ids
       list from arc state, fetches per-message metadata via
       gmail.users.messages.get (format=metadata), and writes the

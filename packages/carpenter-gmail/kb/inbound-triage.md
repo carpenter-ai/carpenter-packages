@@ -1,4 +1,4 @@
-# Inbound email triage (carpenter-email Phase 3a)
+# Inbound email triage (carpenter-gmail Phase 3a)
 
 The `gmail_poll` trigger polls Gmail's `users.history.list` API every
 15 minutes (configurable per install) and emits one `email.received`
@@ -25,7 +25,7 @@ After a triage arc completes, the chat agent receives a
 
 The chat agent does NOT receive the raw email body, header text, or
 unstripped subject.  If you need the body, use the existing read
-templates (`pkg_email_read_*`) which fan a separate arc with full
+templates (`pkg_gmail_read_*`) which fan a separate arc with full
 trust pipeline.
 
 ## Trust contract
@@ -49,7 +49,7 @@ either
 
 If the Gmail API returns 401 (token revoked, scope withdrawn, etc.),
 the trigger emits ONE `email.auth_revoked` event and stops polling
-in-process until the daemon restarts.  Run `pkg_email_authorize` to
+in-process until the daemon restarts.  Run `pkg_gmail_authorize` to
 restore credentials, then restart the daemon (`systemctl --user
 restart carpenter`) — the trigger picks up the new token at next
 heartbeat.

@@ -1,8 +1,8 @@
-# carpenter-email — allowlist setup
+# carpenter-gmail — allowlist setup
 
 This package leans on Carpenter's `SecurityPolicies.email` allowlist
 to decide which senders' addresses can flow through the trust system
-and which recipients `pkg_email_send_email` will accept.
+and which recipients `pkg_gmail_send_email` will accept.
 
 ## What the allowlist actually does
 
@@ -13,14 +13,14 @@ and which recipients `pkg_email_send_email` will accept.
   (D24 invariant I9).  An extract that names an unknown sender will
   fail validation and the JUDGE will return reject.
 
-* On the **send side**, `pkg_email_send_email` validates each `to`
+* On the **send side**, `pkg_gmail_send_email` validates each `to`
   address before it submits the EXECUTOR.  Unknown addresses are
   rejected with a clear error message that points the user at
-  `pkg_email_trust_sender`.
+  `pkg_gmail_trust_sender`.
 
 ## Adding entries
 
-`pkg_email_trust_sender` is the only path.  It's a chat tool that:
+`pkg_gmail_trust_sender` is the only path.  It's a chat tool that:
 1. Takes one email address.
 2. Adds it to the persistent `policy_store` table.
 3. Refreshes the in-memory `SecurityPolicies` singleton so future
@@ -35,7 +35,7 @@ the audit log entry.
 
 ## Removing entries
 
-`pkg_email_untrust_sender` removes one address.  Note that this does
+`pkg_gmail_untrust_sender` removes one address.  Note that this does
 NOT retroactively reject previously-approved extracts — those are
 already trusted Resources.  It only affects future read pipelines
 and future sends.
@@ -53,9 +53,9 @@ and future sends.
 
 | Tool                       | Effect of allowlist                                                |
 | --                         | --                                                                 |
-| `pkg_email_list_inbox`     | Messages from non-allowlisted senders surface but their extracts will fail JUDGE because `from_address` is not in the allowlist. The chat agent only sees JUDGE-approved extracts. |
-| `pkg_email_search_emails`  | Same — search results are still fetched, but extracts from non-allowlisted senders never graduate. |
-| `pkg_email_read_email`     | Same as above for the single message. |
-| `pkg_email_send_email`     | Each `to` must be in the allowlist; the call fails with a clear error otherwise. |
-| `pkg_email_trust_sender`   | Adds an entry. Requires user confirmation. |
-| `pkg_email_untrust_sender` | Removes an entry. Requires user confirmation. |
+| `pkg_gmail_list_inbox`     | Messages from non-allowlisted senders surface but their extracts will fail JUDGE because `from_address` is not in the allowlist. The chat agent only sees JUDGE-approved extracts. |
+| `pkg_gmail_search_emails`  | Same — search results are still fetched, but extracts from non-allowlisted senders never graduate. |
+| `pkg_gmail_read_email`     | Same as above for the single message. |
+| `pkg_gmail_send_email`     | Each `to` must be in the allowlist; the call fails with a clear error otherwise. |
+| `pkg_gmail_trust_sender`   | Adds an entry. Requires user confirmation. |
+| `pkg_gmail_untrust_sender` | Removes an entry. Requires user confirmation. |

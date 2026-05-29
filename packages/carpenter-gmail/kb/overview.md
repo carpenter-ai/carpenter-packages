@@ -1,6 +1,6 @@
-# carpenter-email — overview
+# carpenter-gmail — overview
 
-The `carpenter-email` package is the first real D24 capability
+The `carpenter-gmail` package is the first real D24 capability
 package: it lets the chat agent read and send email through a Gmail
 account while obeying the Carpenter trust invariants.  The chat
 agent never sees raw inbound email bodies — every read goes through
@@ -8,21 +8,21 @@ a pipeline that produces a structured, JUDGE-validated extract.
 
 ## What this package gives you
 
-* **Inbox reading** — `pkg_email_list_inbox`, `pkg_email_search_emails`,
-  `pkg_email_read_email`.  Each fans out an arc tree
+* **Inbox reading** — `pkg_gmail_list_inbox`, `pkg_gmail_search_emails`,
+  `pkg_gmail_read_email`.  Each fans out an arc tree
   (PLANNER -> EXECUTOR -> REVIEWER -> JUDGE) per matching message.
   Once the JUDGE approves, the chat agent can `read_resource` on a
   trusted `EmailSimpleTextExtract`, `EmailMeetingInviteExtract`, or
   `EmailOrderConfirmationExtract` dataclass.
 
-* **Sending** — `pkg_email_send_email` (chat-confirm + allowlist-checked
+* **Sending** — `pkg_gmail_send_email` (chat-confirm + allowlist-checked
   recipients + in-script expected-account check).
 
-* **Allowlist management** — `pkg_email_trust_sender` and
-  `pkg_email_untrust_sender` add or remove `EmailPolicy` entries.
+* **Allowlist management** — `pkg_gmail_trust_sender` and
+  `pkg_gmail_untrust_sender` add or remove `EmailPolicy` entries.
   Both require user confirmation at the chat boundary.
 
-* **OAuth bootstrap** — `pkg_email_authorize` returns a one-time
+* **OAuth bootstrap** — `pkg_gmail_authorize` returns a one-time
   Google sign-in URL.  Tokens are stored in the platform `.env`
   under the `GMAIL_OAUTH_*` prefix.
 
@@ -62,20 +62,20 @@ is reviewed independently with no thread-level trust caching (T10).
 
 * Three read templates: `email_read_simple_text`,
   `email_read_meeting_invite`, `email_read_order_confirmation`.
-* `pkg_email_send_email` with chat-confirm + allowlist + expected-
+* `pkg_gmail_send_email` with chat-confirm + allowlist + expected-
   account check.
 * OAuth via Google's authorization-code flow with `gmail.readonly`,
   `gmail.send`, `userinfo.email` scopes.
 * Two allowlist proposals at install time: domain entries for
   `gmail.googleapis.com` and `oauth2.googleapis.com`.
 * Zero sender-allowlist proposals on day 1 — the user populates the
-  email allowlist one entry at a time via `pkg_email_trust_sender`,
+  email allowlist one entry at a time via `pkg_gmail_trust_sender`,
   defending against the accumulation-attack threat (T9).
 
 ## Phase 4 (v0.6.0): semantic resource index
 
 The package now maintains a per-package vector index over your
-mailbox so `pkg_email_search_emails` can answer natural-language
+mailbox so `pkg_gmail_search_emails` can answer natural-language
 queries without a Gmail API round-trip.  Three PollableTriggers
 (60s cadence) backfill the mailbox in descending `internalDate`
 order, re-index pre-seeded message-id lists, and pick up newly-
@@ -84,8 +84,8 @@ happens in trusted post-JUDGE context — the EXECUTOR never touches
 the vector store.
 
 See `kb/email/index.md` for the trust contract and operator
-controls (`pkg_email_reindex`, `pkg_email_reindex_pause`,
-`pkg_email_reindex_resume`).  See `kb/email/search.md` for the
+controls (`pkg_gmail_reindex`, `pkg_gmail_reindex_pause`,
+`pkg_gmail_reindex_resume`).  See `kb/email/search.md` for the
 vector-or-keyword backend selection rules.
 
 ## Reading more
