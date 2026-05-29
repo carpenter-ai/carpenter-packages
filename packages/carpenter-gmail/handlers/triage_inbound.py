@@ -59,13 +59,18 @@ def handle_email_received(payload: dict[str, Any]) -> None:
     try:
         from carpenter_gmail.tools import _create_triage_arc_tree
     except ImportError:
-        # Tools module not importable (would happen in a stripped test
-        # build).  Log and bail — production never hits this branch.
-        logger.exception(
-            "handle_email_received: cannot import _create_triage_arc_tree; "
-            "skipping message %s", mid,
-        )
-        return
+        try:
+            # Loaded via carpenter.packages.loaders — relative import
+            # resolves under the platform's namespace.
+            from ..tools import _create_triage_arc_tree  # type: ignore
+        except ImportError:
+            # Tools module not importable (would happen in a stripped test
+            # build).  Log and bail — production never hits this branch.
+            logger.exception(
+                "handle_email_received: cannot import "
+                "_create_triage_arc_tree; skipping message %s", mid,
+            )
+            return
     try:
         result = _create_triage_arc_tree(
             provider_message_id=mid,
