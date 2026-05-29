@@ -1,6 +1,6 @@
 """Phase 1 (backfill, descending internalDate) email-index trigger.
 
-See :mod:`carpenter_email.triggers._index_common` for the shared
+See :mod:`carpenter_gmail.triggers._index_common` for the shared
 lifecycle; this module only picks the phase-specific knobs and the
 EXECUTOR pre-seed shape.
 """

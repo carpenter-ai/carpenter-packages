@@ -1,11 +1,11 @@
-name: carpenter-email
-version: "0.6.1"
+name: carpenter-gmail
+version: "0.7.0"
 description: |
   Email assistant package (Gmail API backend).  Phase 1 shipped read
   templates through the D24 untrusted-data pipeline and send mail
   with an expected-account safety check.  Phase 1.5 (v0.2.0) added
-  three external-effect modify tools — pkg_email_archive_email,
-  pkg_email_mark_read_email, pkg_email_draft_email — each guarded by
+  three external-effect modify tools — pkg_gmail_archive_email,
+  pkg_gmail_mark_read_email, pkg_gmail_draft_email — each guarded by
   a chat-boundary human-confirm and an in-script expected-account
   check.
 
@@ -46,7 +46,7 @@ description: |
   Each tick spawns a PLANNER -> EXECUTOR -> REVIEWER -> JUDGE arc
   tree that emits one JUDGE-validated EmailIndexFetchedBatch; the
   trigger then embed+upserts the validated metadata into the
-  carpenter-email PackageVectorStore in trusted post-JUDGE context.
+  carpenter-gmail PackageVectorStore in trusted post-JUDGE context.
   No core-platform changes — vector floats never appear in a
   trusted-context string (package-internal invariant E1).  See
   kb/email/index.md for the trust contract and operator model.
@@ -232,13 +232,13 @@ triggers:
 
 # Phase 3a: route each email.received event into a triage arc tree.
 # The handler is a thin shim that spawns the email_triage arc tree
-# (see carpenter_email.handlers.triage_inbound).
+# (see carpenter_gmail.handlers.triage_inbound).
 trigger_subscriptions:
   - event: email.received
     handler: handlers.triage_inbound:handle_email_received
 
 # Phase 1 ships ZERO sender allowlist proposals.  The user populates
-# the email allowlist via pkg_email_trust_sender (chat tool), one
+# the email allowlist via pkg_gmail_trust_sender (chat tool), one
 # entry at a time, with the standard human-confirm flow.  This keeps
 # the accumulation-attack threat (T9) from biting.
 #
@@ -263,7 +263,7 @@ allowlist_proposals:
 # audit-readable shape.
 #
 # Migration note for v0.1.0 users: Google supports incremental
-# authorisation, so re-running pkg_email_authorize once augments the
+# authorisation, so re-running pkg_gmail_authorize once augments the
 # token's scope set without revoking existing grants.  The platform's
 # generic OAuth-callback flow (carpenter/api/oauth.py) handles the
 # redirect-and-exchange round-trip and writes tokens to the platform

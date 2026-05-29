@@ -1,4 +1,4 @@
-# carpenter-email
+# carpenter-gmail
 
 D24 capability package: Gmail read + send for the chat agent, with
 the full PLANNER -> EXECUTOR -> REVIEWER -> JUDGE pipeline gating
@@ -54,7 +54,7 @@ machinery via the standard install flow:
 
 ## First-run
 
-After install, the user must run `pkg_email_authorize` (a chat tool)
+After install, the user must run `pkg_gmail_authorize` (a chat tool)
 to complete the Google OAuth round-trip.  The platform stores
 access/refresh tokens in `.env` under `GMAIL_OAUTH_*`.
 
@@ -65,20 +65,20 @@ This package (v0.2.0) ships Phase 1 + Phase 1.5:
 Phase 1:
 
 * Three read templates with REVIEWER + JUDGE.
-* `pkg_email_send_email` with chat-confirm + allowlist + expected-
+* `pkg_gmail_send_email` with chat-confirm + allowlist + expected-
   account check.
-* Allowlist mutation tools (`pkg_email_trust_sender`,
-  `pkg_email_untrust_sender`).
-* OAuth bootstrap (`pkg_email_authorize`).
+* Allowlist mutation tools (`pkg_gmail_trust_sender`,
+  `pkg_gmail_untrust_sender`).
+* OAuth bootstrap (`pkg_gmail_authorize`).
 
 Phase 1.5 (v0.2.0):
 
-* `pkg_email_archive_email` — remove INBOX label, idempotent.
-* `pkg_email_mark_read_email` — remove UNREAD label, idempotent.
-* `pkg_email_draft_email` — create a Gmail draft, recipients
+* `pkg_gmail_archive_email` — remove INBOX label, idempotent.
+* `pkg_gmail_mark_read_email` — remove UNREAD label, idempotent.
+* `pkg_gmail_draft_email` — create a Gmail draft, recipients
   validated against the allowlist at draft-creation time.
 
-All three Phase 1.5 tools share `pkg_email_send_email`'s trust
+All three Phase 1.5 tools share `pkg_gmail_send_email`'s trust
 shape: single-arc untrusted EXECUTOR pipeline guarded by
 `requires_user_confirm=True` at the chat boundary and an in-script
 expected-account check.  They are external-effect operations, NOT

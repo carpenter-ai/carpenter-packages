@@ -1,8 +1,8 @@
-# carpenter-email — attachment metadata (read this carefully)
+# carpenter-gmail — attachment metadata (read this carefully)
 
 **This article is for you, the chat agent.**  It explains how to
 treat the `attachments` field that appears on every JUDGE-approved
-read-side email extract from carpenter-email v0.5.0 onwards.
+read-side email extract from carpenter-gmail v0.5.0 onwards.
 
 ## What you actually see
 

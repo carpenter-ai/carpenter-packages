@@ -1,4 +1,4 @@
-"""carpenter-email package-shipped trigger classes.
+"""carpenter-gmail package-shipped trigger classes.
 
 Each module here registers a :class:`carpenter.core.engine.triggers.base.Trigger`
 subclass via the manifest's ``triggers:`` block.  The platform's

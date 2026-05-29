@@ -1,4 +1,4 @@
-"""Chat tools for the carpenter-email package.
+"""Chat tools for the carpenter-gmail package.
 
 These are the chat-boundary tools the chat agent calls.  Each is a
 ``@chat_tool``-decorated function.  Read-side and write-side tools
@@ -13,20 +13,20 @@ in carpenter-core and the Phase 1.5 v2 plan at
 * The chat agent never sees raw email bodies.  All read paths route
   through a templated REVIEWER + deterministic JUDGE that graduates
   a structured extract Resource to trusted state.
-* The four external-effect tools (``pkg_email_send_email``,
-  ``pkg_email_archive_email``, ``pkg_email_mark_read_email``,
-  ``pkg_email_draft_email``) each require user confirmation at the
+* The four external-effect tools (``pkg_gmail_send_email``,
+  ``pkg_gmail_archive_email``, ``pkg_gmail_mark_read_email``,
+  ``pkg_gmail_draft_email``) each require user confirmation at the
   chat boundary AND go through the same four-arc tree as reads.  The
   EXECUTOR's pre-verified script writes a small structured JSON
   receipt; the REVIEWER + JUDGE graduate a typed EmailXxxResult
   dataclass so the chat agent can phrase the outcome without ever
   consuming Gmail's response body directly.
-* ``pkg_email_send_email`` and ``pkg_email_draft_email`` additionally
+* ``pkg_gmail_send_email`` and ``pkg_gmail_draft_email`` additionally
   validate each ``to`` address against the global
   ``SecurityPolicies.email`` allowlist at the chat boundary BEFORE
   the arc is built.
-* Allowlist mutation (``pkg_email_trust_sender`` /
-  ``pkg_email_untrust_sender``) goes through the platform's
+* Allowlist mutation (``pkg_gmail_trust_sender`` /
+  ``pkg_gmail_untrust_sender``) goes through the platform's
   ``policy_store`` write path with ``requires_user_confirm=True`` so
   every entry is human-approved at chat time.
 """
@@ -553,7 +553,7 @@ def _create_triage_arc_tree(
         "Gmail mailbox.  No email data is accessed by this call.  "
         "After the user completes the flow the access/refresh tokens "
         "are written to the platform .env under the GMAIL_OAUTH_ "
-        "prefix and pkg_email_list_inbox / pkg_email_send_email "
+        "prefix and pkg_gmail_list_inbox / pkg_gmail_send_email "
         "become functional."
     ),
     input_schema={
@@ -563,7 +563,7 @@ def _create_triage_arc_tree(
     },
     capabilities=["external_effect"],
 )
-def pkg_email_authorize(tool_input, **kwargs):
+def pkg_gmail_authorize(tool_input, **kwargs):
     """Kick off the Google OAuth authorization-code flow.
 
     Reads the operator-supplied client_id / client_secret from the
@@ -603,7 +603,7 @@ def pkg_email_authorize(tool_input, **kwargs):
                 "https://www.googleapis.com/auth/userinfo.email",
             ],
             env_key_prefix=_ENV_KEY_PREFIX,
-            package_name="carpenter-email",
+            package_name="carpenter-gmail",
             extra_authorize_params={
                 # Force Google to issue a refresh_token even on repeat consent.
                 "access_type": "offline",
@@ -624,12 +624,12 @@ def pkg_email_authorize(tool_input, **kwargs):
                 "Google account whose mail you want Carpenter to "
                 "read, and grant the requested scopes.  The platform "
                 "will write tokens to .env automatically.  After "
-                "that you can call pkg_email_list_inbox / "
-                "pkg_email_send_email."
+                "that you can call pkg_gmail_list_inbox / "
+                "pkg_gmail_send_email."
             ),
         })
     except Exception as exc:  # noqa: BLE001
-        logger.exception("pkg_email_authorize: start_flow failed")
+        logger.exception("pkg_gmail_authorize: start_flow failed")
         return json.dumps({"error": f"start_flow failed: {exc}"})
 
 
@@ -658,7 +658,7 @@ def _resolve_expected_account() -> str:
 
 _EXPECTED_ACCOUNT_NOT_CONFIGURED_ERROR = (
     "expected_account is not configured (neither GMAIL_OAUTH_ACCOUNT_EMAIL "
-    "nor operator_email is set).  Run pkg_email_authorize first to "
+    "nor operator_email is set).  Run pkg_gmail_authorize first to "
     "complete the Gmail OAuth flow — without this, the T1 envelope "
     "recipient-mismatch check cannot be enforced and read paths fail "
     "closed."
@@ -772,7 +772,7 @@ def _create_search_executor(
 
 def _index_status_snapshot() -> dict:
     """Return a small structured snapshot of the indexer's progress
-    for inclusion in pkg_email_search_emails responses.
+    for inclusion in pkg_gmail_search_emails responses.
 
     The chat agent surfaces this to the user so they understand
     whether a search hit zero results because nothing matched OR
@@ -792,10 +792,10 @@ def _index_status_snapshot() -> dict:
     except ImportError:
         return out
     try:
-        out["vector_count"] = PackageVectorStore("carpenter-email").count()
+        out["vector_count"] = PackageVectorStore("carpenter-gmail").count()
     except Exception:
         pass
-    pkg_state = PackageStateHandle("carpenter-email")
+    pkg_state = PackageStateHandle("carpenter-gmail")
     try:
         out["phase1_complete"] = bool(
             pkg_state.get("index_phase1_completed_at"),
@@ -813,7 +813,7 @@ def _index_status_snapshot() -> dict:
 def _vector_search(
     query_text: str, max_results: int,
 ) -> list[dict] | None:
-    """Embed *query_text* and search the carpenter-email vector
+    """Embed *query_text* and search the carpenter-gmail vector
     namespace.  Returns a list of dicts ``{"provider_message_id":
     str, "score": float, "metadata": dict}`` or ``None`` if vectors
     are unavailable in this build.
@@ -823,11 +823,11 @@ def _vector_search(
     except ImportError:
         return None
     try:
-        vectors = PackageVectorStore("carpenter-email")
+        vectors = PackageVectorStore("carpenter-gmail")
         hits = vectors.embed_and_search(query_text, top_k=max_results)
     except Exception:  # noqa: BLE001 — vector failures are not fatal
         logger.exception(
-            "pkg_email_search_emails: vector backend failed; falling "
+            "pkg_gmail_search_emails: vector backend failed; falling "
             "back to keyword search",
         )
         return None
@@ -897,7 +897,7 @@ def _vector_search(
     },
     capabilities=["arc_create"],
 )
-def pkg_email_search_emails(tool_input, **kwargs):
+def pkg_gmail_search_emails(tool_input, **kwargs):
     """Vector-or-keyword email search with index-status surfacing."""
     query = (tool_input.get("query") or "").strip()
     max_results = int(tool_input.get("max_results") or 10)
@@ -953,7 +953,7 @@ def pkg_email_search_emails(tool_input, **kwargs):
                 "note": (
                     f"{len(hits)} vector hit(s) returned without a "
                     "Gmail API round-trip.  Pass a provider_message_id "
-                    "to pkg_email_read_email to graduate a typed "
+                    "to pkg_gmail_read_email to graduate a typed "
                     "extract Resource."
                 ),
             })
@@ -999,10 +999,10 @@ def pkg_email_search_emails(tool_input, **kwargs):
     },
     capabilities=["arc_create"],
 )
-def pkg_email_list_inbox(tool_input, **kwargs):
-    """Equivalent to pkg_email_search_emails(query='in:inbox')."""
+def pkg_gmail_list_inbox(tool_input, **kwargs):
+    """Equivalent to pkg_gmail_search_emails(query='in:inbox')."""
     n = int(tool_input.get("max_results") or 10)
-    return pkg_email_search_emails(
+    return pkg_gmail_search_emails(
         {"query": "in:inbox", "max_results": n},
         **kwargs,
     )
@@ -1037,7 +1037,7 @@ def pkg_email_list_inbox(tool_input, **kwargs):
     },
     capabilities=["arc_create"],
 )
-def pkg_email_read_email(tool_input, **kwargs):
+def pkg_gmail_read_email(tool_input, **kwargs):
     """Run one read template on one message id."""
     mid = (tool_input.get("provider_message_id") or "").strip()
     if not mid:
@@ -1064,7 +1064,7 @@ def pkg_email_read_email(tool_input, **kwargs):
 
 
 # ---------------------------------------------------------------------------
-# Send-side: pkg_email_send_email
+# Send-side: pkg_gmail_send_email
 # ---------------------------------------------------------------------------
 
 
@@ -1100,7 +1100,7 @@ def _build_raw_message(
                 "description": (
                     "Recipient email addresses.  Each must be in the "
                     "SecurityPolicies.email allowlist (use "
-                    "pkg_email_trust_sender to add)."
+                    "pkg_gmail_trust_sender to add)."
                 ),
             },
             "subject": {"type": "string"},
@@ -1111,7 +1111,7 @@ def _build_raw_message(
     capabilities=["arc_create", "external_effect"],
     requires_user_confirm=True,
 )
-def pkg_email_send_email(tool_input, **kwargs):
+def pkg_gmail_send_email(tool_input, **kwargs):
     """Send an email through the Gmail API via the write-side arc tree.
 
     Arc shape: PLANNER -> EXECUTOR (untrusted) -> REVIEWER ->
@@ -1151,7 +1151,7 @@ def pkg_email_send_email(tool_input, **kwargs):
             return json.dumps({
                 "error": (
                     f"recipient {addr!r} is not in the email "
-                    f"allowlist; use pkg_email_trust_sender to add."
+                    f"allowlist; use pkg_gmail_trust_sender to add."
                 ),
             })
 
@@ -1209,7 +1209,7 @@ def pkg_email_send_email(tool_input, **kwargs):
         "allowlist.  After adding, that sender's messages can pass "
         "the EmailPolicy literal validation in extract dataclasses, "
         "and that recipient can be used as a ``to`` for "
-        "pkg_email_send_email.  Requires user confirmation."
+        "pkg_gmail_send_email.  Requires user confirmation."
     ),
     input_schema={
         "type": "object",
@@ -1231,7 +1231,7 @@ def pkg_email_send_email(tool_input, **kwargs):
     capabilities=["database_write"],
     requires_user_confirm=True,
 )
-def pkg_email_trust_sender(tool_input, **kwargs):
+def pkg_gmail_trust_sender(tool_input, **kwargs):
     """Add an EmailPolicy entry to the global email allowlist."""
     from carpenter.security import get_policies
     from carpenter.security import policy_store
@@ -1246,7 +1246,7 @@ def pkg_email_trust_sender(tool_input, **kwargs):
         # for the next dataclass-construction validation pass.
         get_policies().add("email", addr)
     except Exception as exc:  # noqa: BLE001
-        logger.exception("pkg_email_trust_sender: add failed")
+        logger.exception("pkg_gmail_trust_sender: add failed")
         return json.dumps({"error": f"add failed: {exc}"})
     return json.dumps({"accepted": True, "email": addr})
 
@@ -1269,7 +1269,7 @@ def pkg_email_trust_sender(tool_input, **kwargs):
     capabilities=["database_write"],
     requires_user_confirm=True,
 )
-def pkg_email_untrust_sender(tool_input, **kwargs):
+def pkg_gmail_untrust_sender(tool_input, **kwargs):
     """Remove an EmailPolicy entry from the allowlist."""
     from carpenter.security import get_policies
     from carpenter.security import policy_store
@@ -1573,7 +1573,7 @@ def _create_write_arc_tree(
         "Archive a Gmail message (remove the INBOX label).  Idempotent: "
         "archiving an already-archived message returns "
         "{archived: true, was_already_archived: true}.  Trust shape "
-        "mirrors pkg_email_send_email — single untrusted EXECUTOR arc, "
+        "mirrors pkg_gmail_send_email — single untrusted EXECUTOR arc, "
         "chat-boundary human confirm, in-script expected-account check.  "
         "Allowlist is NOT consulted because no recipient surface exists; "
         "this only mutates own-inbox state."
@@ -1591,7 +1591,7 @@ def _create_write_arc_tree(
     capabilities=["arc_create", "external_effect"],
     requires_user_confirm=True,
 )
-def pkg_email_archive_email(tool_input, **kwargs):
+def pkg_gmail_archive_email(tool_input, **kwargs):
     """Archive one Gmail message via an EXECUTOR arc."""
     from .scripts import GMAIL_ARCHIVE_SCRIPT
 
@@ -1605,7 +1605,7 @@ def pkg_email_archive_email(tool_input, **kwargs):
             "error": (
                 "operator_email / GMAIL_OAUTH_ACCOUNT_EMAIL not "
                 "configured; cannot perform expected-account check.  "
-                "Run pkg_email_authorize first."
+                "Run pkg_gmail_authorize first."
             ),
         })
 
@@ -1643,7 +1643,7 @@ def pkg_email_archive_email(tool_input, **kwargs):
         "Mark a Gmail message as read (remove the UNREAD label).  "
         "Idempotent: marking an already-read message returns "
         "{marked_read: true, was_already_read: true}.  Trust shape "
-        "mirrors pkg_email_send_email — single untrusted EXECUTOR arc, "
+        "mirrors pkg_gmail_send_email — single untrusted EXECUTOR arc, "
         "chat-boundary human confirm, in-script expected-account check."
     ),
     input_schema={
@@ -1659,7 +1659,7 @@ def pkg_email_archive_email(tool_input, **kwargs):
     capabilities=["arc_create", "external_effect"],
     requires_user_confirm=True,
 )
-def pkg_email_mark_read_email(tool_input, **kwargs):
+def pkg_gmail_mark_read_email(tool_input, **kwargs):
     """Mark one Gmail message as read via an EXECUTOR arc."""
     from .scripts import GMAIL_MARK_READ_SCRIPT
 
@@ -1673,7 +1673,7 @@ def pkg_email_mark_read_email(tool_input, **kwargs):
             "error": (
                 "operator_email / GMAIL_OAUTH_ACCOUNT_EMAIL not "
                 "configured; cannot perform expected-account check.  "
-                "Run pkg_email_authorize first."
+                "Run pkg_gmail_authorize first."
             ),
         })
 
@@ -1716,7 +1716,7 @@ def pkg_email_mark_read_email(tool_input, **kwargs):
         "Each call creates a NEW draft; there is no update-draft tool "
         "in Phase 1.5 because sending a stale draft would bypass the "
         "re-confirm on body content (send the draft by re-running "
-        "pkg_email_send_email with the same body)."
+        "pkg_gmail_send_email with the same body)."
     ),
     input_schema={
         "type": "object",
@@ -1727,7 +1727,7 @@ def pkg_email_mark_read_email(tool_input, **kwargs):
                 "description": (
                     "Recipient email addresses.  Each must be in the "
                     "SecurityPolicies.email allowlist (use "
-                    "pkg_email_trust_sender to add)."
+                    "pkg_gmail_trust_sender to add)."
                 ),
             },
             "subject": {"type": "string"},
@@ -1738,7 +1738,7 @@ def pkg_email_mark_read_email(tool_input, **kwargs):
     capabilities=["arc_create", "external_effect"],
     requires_user_confirm=True,
 )
-def pkg_email_draft_email(tool_input, **kwargs):
+def pkg_gmail_draft_email(tool_input, **kwargs):
     """Create a Gmail draft via an EXECUTOR arc."""
     from carpenter.security import get_policies
 
@@ -1755,7 +1755,7 @@ def pkg_email_draft_email(tool_input, **kwargs):
     if not body:
         return json.dumps({"error": "body is required"})
 
-    # Mirror pkg_email_send_email: validate every recipient against the
+    # Mirror pkg_gmail_send_email: validate every recipient against the
     # global allowlist BEFORE creating the arc.  Drafts with un-
     # allowlisted addresses would be a foothold for a later
     # send-bypass and are refused up-front.
@@ -1765,7 +1765,7 @@ def pkg_email_draft_email(tool_input, **kwargs):
             return json.dumps({
                 "error": (
                     f"recipient {addr!r} is not in the email "
-                    f"allowlist; use pkg_email_trust_sender to add."
+                    f"allowlist; use pkg_gmail_trust_sender to add."
                 ),
             })
 
@@ -1775,7 +1775,7 @@ def pkg_email_draft_email(tool_input, **kwargs):
             "error": (
                 "operator_email / GMAIL_OAUTH_ACCOUNT_EMAIL not "
                 "configured; cannot perform expected-account check.  "
-                "Run pkg_email_authorize first."
+                "Run pkg_gmail_authorize first."
             ),
         })
 
@@ -2094,7 +2094,7 @@ def _create_index_arc_tree(
     requires_user_confirm=True,
     capabilities=[],
 )
-def pkg_email_reindex(tool_input, **kwargs):
+def pkg_gmail_reindex(tool_input, **kwargs):
     """Wipe the email vector namespace and reset indexer watermarks."""
     reason = (tool_input.get("reason") or "").strip()[:256]
     try:
@@ -2102,8 +2102,8 @@ def pkg_email_reindex(tool_input, **kwargs):
         from carpenter.packages.vectors import PackageVectorStore
     except ImportError:
         return json.dumps({"error": "package.state / package.vectors unavailable"})
-    pkg_state = PackageStateHandle("carpenter-email")
-    vectors = PackageVectorStore("carpenter-email")
+    pkg_state = PackageStateHandle("carpenter-gmail")
+    vectors = PackageVectorStore("carpenter-gmail")
     try:
         cleared = vectors.clear()
     except Exception as exc:  # noqa: BLE001
@@ -2149,7 +2149,7 @@ def pkg_email_reindex(tool_input, **kwargs):
         "incremental).  Useful when the user is hitting their Gmail "
         "API quota or wants to suspend background work.  Does not "
         "cancel in-flight arcs; new arcs simply will not spawn until "
-        "pkg_email_reindex_resume is called.  Requires user confirm."
+        "pkg_gmail_reindex_resume is called.  Requires user confirm."
     ),
     input_schema={
         "type": "object",
@@ -2165,14 +2165,14 @@ def pkg_email_reindex(tool_input, **kwargs):
     requires_user_confirm=True,
     capabilities=[],
 )
-def pkg_email_reindex_pause(tool_input, **kwargs):
+def pkg_gmail_reindex_pause(tool_input, **kwargs):
     """Set the indexer pause flag in package_state."""
     reason = (tool_input.get("reason") or "").strip()[:256]
     try:
         from carpenter.packages.state import PackageStateHandle
     except ImportError:
         return json.dumps({"error": "package.state unavailable"})
-    pkg_state = PackageStateHandle("carpenter-email")
+    pkg_state = PackageStateHandle("carpenter-gmail")
     try:
         pkg_state.set(
             "index_paused",
@@ -2182,7 +2182,7 @@ def pkg_email_reindex_pause(tool_input, **kwargs):
         return json.dumps({"error": f"pause failed: {exc}"})
     return json.dumps({
         "ok": True,
-        "note": "Indexer paused.  Run pkg_email_reindex_resume to resume.",
+        "note": "Indexer paused.  Run pkg_gmail_reindex_resume to resume.",
     })
 
 
@@ -2201,13 +2201,13 @@ def pkg_email_reindex_pause(tool_input, **kwargs):
     requires_user_confirm=True,
     capabilities=[],
 )
-def pkg_email_reindex_resume(tool_input, **kwargs):
+def pkg_gmail_reindex_resume(tool_input, **kwargs):
     """Clear the indexer pause flag."""
     try:
         from carpenter.packages.state import PackageStateHandle
     except ImportError:
         return json.dumps({"error": "package.state unavailable"})
-    pkg_state = PackageStateHandle("carpenter-email")
+    pkg_state = PackageStateHandle("carpenter-gmail")
     try:
         pkg_state.delete("index_paused")
     except Exception as exc:  # noqa: BLE001

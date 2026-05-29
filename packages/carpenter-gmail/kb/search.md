@@ -1,8 +1,8 @@
-# Email Search (`pkg_email_search_emails`)
+# Email Search (`pkg_gmail_search_emails`)
 
-`pkg_email_search_emails` has two backends:
+`pkg_gmail_search_emails` has two backends:
 
-* **Vector** — semantic search over the carpenter-email
+* **Vector** — semantic search over the carpenter-gmail
   `PackageVectorStore`.  No Gmail API round-trip.  Fast.  Requires
   the index to be populated (see `email/index` KB article).
 * **Keyword** — fans out an EXECUTOR that calls

@@ -1,5 +1,5 @@
 You are extracting a structured batch of Gmail message metadata for
-the carpenter-email semantic resource index (Phase 1: backfill).
+the carpenter-gmail semantic resource index (Phase 1: backfill).
 
 CONTEXT
 -------

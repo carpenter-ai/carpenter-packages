@@ -1,6 +1,6 @@
 name: email_index_phase1
 description: |
-  Phase 1 of the carpenter-email semantic resource index (Phase 4 PR-A).
+  Phase 1 of the carpenter-gmail semantic resource index (Phase 4 PR-A).
   Backfills the email vector index by walking Gmail messages in
   descending ``internalDate`` order in batches of <=100.
 
@@ -11,7 +11,7 @@ description: |
   upsert + watermark CAS in trusted context AFTER the JUDGE verdict —
   no embedding or vector write happens inside an untrusted arc.
 
-  Pipeline shape mirrors every other carpenter-email template:
+  Pipeline shape mirrors every other carpenter-gmail template:
   PLANNER -> EXECUTOR (untrusted; pre-verified Gmail fetch script) ->
   REVIEWER (static prompt; no KB; only derive_resource) -> JUDGE
   (deterministic Python).
@@ -27,7 +27,7 @@ steps:
   - name: fetch-batch
     description: |
       Untrusted EXECUTOR step.  Submits the pre-verified Phase 1 Gmail
-      fetch script (carpenter_email.scripts.GMAIL_INDEX_PHASE1_SCRIPT)
+      fetch script (carpenter_gmail.scripts.GMAIL_INDEX_PHASE1_SCRIPT)
       verbatim via submit_code.  The script reads watermark / max_batch
       from arc state, lists message ids via gmail.users.messages.list,
       fetches per-message metadata via gmail.users.messages.get

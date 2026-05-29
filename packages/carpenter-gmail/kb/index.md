@@ -1,7 +1,7 @@
 # Email Semantic Resource Index
 
 Carpenter-email (v0.6.0+) maintains a per-package vector index over
-your Gmail mailbox.  The index lets `pkg_email_search_emails` answer
+your Gmail mailbox.  The index lets `pkg_gmail_search_emails` answer
 natural-language queries (e.g. "the message from Alice last week
 about the conference travel reimbursement") without a Gmail API
 round-trip.
@@ -30,7 +30,7 @@ performs the **embed + upsert** in trusted post-JUDGE context.
   response cannot poison the vector index — the JUDGE re-validates
   every field against the closed regexes / enums in
   `judges._sanitize_index_metadata`.
-* **One package, one namespace**.  The carpenter-email vector store
+* **One package, one namespace**.  The carpenter-gmail vector store
   is bound to the package name at construction; no other package
   can read or write it (D24 I9 isolation, enforced by the
   `PackageVectorStore` loader).
@@ -58,10 +58,10 @@ tick spawn a fresh arc.
 
 ## Operator-visible controls
 
-* `pkg_email_reindex` — wipes the namespace, resets all three
+* `pkg_gmail_reindex` — wipes the namespace, resets all three
   watermarks.  Requires user confirm.  Use after changing the
   embedding model or to recover from a corrupt index.
-* `pkg_email_reindex_pause` / `pkg_email_reindex_resume` — gate
+* `pkg_gmail_reindex_pause` / `pkg_gmail_reindex_resume` — gate
   all three triggers via `index_paused` in `package_state`.
   Requires user confirm.
 
@@ -73,7 +73,7 @@ tick spawn a fresh arc.
   `error_kind="model_identity_mismatch"` on an empty batch; the
   trigger pauses indexing and surfaces the reason via the chat
   agent's normal arc-completion notify path.  The user must run
-  `pkg_email_reindex` to recover.
+  `pkg_gmail_reindex` to recover.
 * **Expired Gmail history watermark** (>7 days stale).  Gmail
   returns 404 from `history.list`; the EXECUTOR catches that
   cleanly and emits `error_kind="history_expired"`.  The
@@ -85,11 +85,11 @@ tick spawn a fresh arc.
 
 ## When the chat agent should mention indexing
 
-* If `pkg_email_search_emails` returns `backend: "keyword"` with
+* If `pkg_gmail_search_emails` returns `backend: "keyword"` with
   `index_status.vector_count == 0`, say "the index is empty;
   Phase 1 backfill will populate it over the next few minutes."
 * If `index_status.paused` is true, say "indexing is paused — run
-  `pkg_email_reindex_resume` to continue."
+  `pkg_gmail_reindex_resume` to continue."
 * If the user complains that recent mail isn't found, check
   `index_status.incremental_ready` — if false, that's the cause.
 

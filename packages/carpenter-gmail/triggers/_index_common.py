@@ -19,7 +19,7 @@ Design properties (cross-reference ``phase-4-plan.md`` D5, D8, D12):
 * **Per-package E1 invariant**.  Vector floats never appear in any
   trusted-context string.  The trigger reads scores back from
   ``embed_and_search`` but only at chat-tool surface in
-  :mod:`carpenter_email.tools` — this module deals only in embed
+  :mod:`carpenter_gmail.tools` — this module deals only in embed
   inputs and upsert ids/metadata.
 """
 
@@ -38,7 +38,7 @@ from carpenter.core.engine.triggers.base import PollableTrigger
 logger = logging.getLogger(__name__)
 
 
-# Shared package_state keys.  Held under the carpenter-email
+# Shared package_state keys.  Held under the carpenter-gmail
 # PackageStateHandle (auto-namespaced; cannot collide with another
 # package).
 KEY_PAUSED = "index_paused"
@@ -99,7 +99,7 @@ def make_batch_id() -> str:
 
 
 class IndexTriggerBase(PollableTrigger):
-    """Common base for all three carpenter-email index triggers.
+    """Common base for all three carpenter-gmail index triggers.
 
     Subclasses provide:
 
@@ -368,7 +368,7 @@ class IndexTriggerBase(PollableTrigger):
             read_resource_content as _read_resource_content,
         )
         try:
-            from carpenter_email.data_models import (
+            from carpenter_gmail.data_models import (
                 EmailIndexFetchedBatch,
                 EMAIL_INDEX_MAX_BATCH,
             )
@@ -443,7 +443,7 @@ class IndexTriggerBase(PollableTrigger):
         # Write an audit receipt to package_state so the chat agent
         # can introspect indexing progress.
         try:
-            from carpenter_email.data_models import EmailIndexBatchReceipt
+            from carpenter_gmail.data_models import EmailIndexBatchReceipt
         except ImportError:
             from .data_models import EmailIndexBatchReceipt  # type: ignore
         receipt = EmailIndexBatchReceipt(
@@ -505,7 +505,7 @@ class IndexTriggerBase(PollableTrigger):
         if not is_dataclass(klass):
             raise RuntimeError(f"{klass!r} is not a dataclass")
         try:
-            from carpenter_email.data_models import EmailIndexFetchedEntry
+            from carpenter_gmail.data_models import EmailIndexFetchedEntry
         except ImportError:
             from .data_models import EmailIndexFetchedEntry  # type: ignore
         entries_raw = data.get("entries") or ()
@@ -583,7 +583,7 @@ class IndexTriggerBase(PollableTrigger):
         """Handle a non-empty error_kind on a JUDGE-approved batch.
 
         ``"model_identity_mismatch"`` — pause indexing; the user must
-        run pkg_email_reindex to clear the namespace and restart.
+        run pkg_gmail_reindex to clear the namespace and restart.
 
         ``"history_expired"`` — clear the incremental watermark so
         Phase 1 backfill can take over for the missed range.
@@ -596,7 +596,7 @@ class IndexTriggerBase(PollableTrigger):
                         "paused": True,
                         "reason": (
                             "model_identity changed since last index "
-                            "batch; run pkg_email_reindex to clear "
+                            "batch; run pkg_gmail_reindex to clear "
                             "the namespace and restart from scratch"
                         ),
                     }),
@@ -684,7 +684,7 @@ class IndexTriggerBase(PollableTrigger):
         # Read the expected-account email (cached by gmail_poll under
         # KEY_ACCOUNT_EMAIL, or empty if unauthorised yet).
         try:
-            from carpenter_email.triggers.gmail_poll import _KEY_ACCOUNT_EMAIL
+            from carpenter_gmail.triggers.gmail_poll import _KEY_ACCOUNT_EMAIL
         except ImportError:
             from .gmail_poll import _KEY_ACCOUNT_EMAIL  # type: ignore
         try:
@@ -725,7 +725,7 @@ class IndexTriggerBase(PollableTrigger):
         batch_id = make_batch_id()
 
         try:
-            from carpenter_email.tools import _create_index_arc_tree
+            from carpenter_gmail.tools import _create_index_arc_tree
         except ImportError:
             from .tools import _create_index_arc_tree  # type: ignore
         result = _create_index_arc_tree(

@@ -1,6 +1,6 @@
 name: email_index_incremental
 description: |
-  Incremental phase of the carpenter-email semantic resource index
+  Incremental phase of the carpenter-gmail semantic resource index
   (Phase 4 PR-A).  Picks up newly-arrived messages by walking
   Gmail's ``users.history.list`` from a stored historyId watermark.
 
@@ -24,7 +24,7 @@ steps:
   - name: fetch-batch
     description: |
       Untrusted EXECUTOR step.  Submits
-      carpenter_email.scripts.GMAIL_INDEX_INCREMENTAL_SCRIPT verbatim
+      carpenter_gmail.scripts.GMAIL_INDEX_INCREMENTAL_SCRIPT verbatim
       via submit_code.  The script walks Gmail history.list from a
       pre-seeded ``start_history_id`` and writes the result JSON
       (including any ``history_expired`` pause signal) to the raw

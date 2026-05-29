@@ -1,6 +1,6 @@
-# carpenter-email — setup & first-use guide
+# carpenter-gmail — setup & first-use guide
 
-This is the end-user guide for the `carpenter-email` package. It walks
+This is the end-user guide for the `carpenter-gmail` package. It walks
 you from a fresh Carpenter install through to "I can send and receive
 mail through my chat agent". If you're a package developer looking for
 the design / trust model, read [`README.md`](README.md) and the
@@ -23,8 +23,8 @@ capabilities:
 - **Stage drafts** (Phase 1.5) with the same recipient-allowlist
   check as send. Drafts are NOT sent automatically.
 - **Authorize** a Gmail account once via OAuth.
-- **Manage** the per-sender allowlist with `pkg_email_trust_sender`
-  and `pkg_email_untrust_sender`.
+- **Manage** the per-sender allowlist with `pkg_gmail_trust_sender`
+  and `pkg_gmail_untrust_sender`.
 
 What it deliberately does **not** do: poll your inbox for new mail,
 read attachments, send a saved draft without re-confirming the body
@@ -41,7 +41,7 @@ v0.2.0 adds two new OAuth scopes — `gmail.modify` (for archive +
 mark-read) and `gmail.compose` (for drafts). Google supports
 incremental authorisation, so the migration is:
 
-1. After upgrading the package, re-run `pkg_email_authorize` ONCE in
+1. After upgrading the package, re-run `pkg_gmail_authorize` ONCE in
    chat.
 2. The consent screen will list all five scopes — `gmail.readonly`,
    `gmail.send`, `gmail.modify`, `gmail.compose`, `userinfo.email`.
@@ -71,7 +71,7 @@ Sign in at <https://console.cloud.google.com/> with the Google account
 whose mail you want Carpenter to read. (You can use an existing
 project if you have one — just check the OAuth consent screen is
 configured for your account.) Create a new project; give it any name
-you'll recognise (e.g. "carpenter-email").
+you'll recognise (e.g. "carpenter-gmail").
 
 ### 1.2 Enable the Gmail API
 
@@ -111,19 +111,19 @@ the only user.)
 
 Open **APIs & Services → Credentials → Create Credentials → OAuth
 client ID**. Choose **Application type: Web application**. Give it a
-name ("carpenter-email").
+name ("carpenter-gmail").
 
 Under **Authorized redirect URIs**, add one URI:
 
 ```
-{public_base_url}/api/oauth/callback/carpenter-email
+{public_base_url}/api/oauth/callback/carpenter-gmail
 ```
 
 `{public_base_url}` is whatever URL your Carpenter instance is reachable
 at from your browser — for a typical Pi setup that's something like
 `https://rainbow-forge.duckdns.org:3080` (the session-platform port),
 but it'll be different for your deployment. The path
-(`/api/oauth/callback/carpenter-email`) is fixed and is what the
+(`/api/oauth/callback/carpenter-gmail`) is fixed and is what the
 platform's generic OAuth callback handler listens on.
 
 If you don't know your public base URL: open Carpenter in your
@@ -140,12 +140,12 @@ secret**. Copy both — you'll paste them in step 2.
 In the Carpenter chat, ask the agent to install the package. The chat
 agent calls the `install_package` tool internally:
 
-> **You:** "Install the carpenter-email package."
+> **You:** "Install the carpenter-gmail package."
 
-The agent will run `install_package(name="carpenter-email")` and
+The agent will run `install_package(name="carpenter-gmail")` and
 should report something like:
 
-> **Agent:** "Installed carpenter-email v0.2.0. Two allowlist
+> **Agent:** "Installed carpenter-gmail v0.2.0. Two allowlist
 > entries (`gmail.googleapis.com`, `oauth2.googleapis.com`) need
 > your approval; I've queued them for you. Also need OAuth
 > credentials for Google — please paste the client_id / client_secret
@@ -162,12 +162,12 @@ Behind the scenes the platform's package installer reads
    `email_read_meeting_invite`, `email_read_order_confirmation`).
 3. Wires the three deterministic JUDGE handlers.
 4. Registers the ten chat tools — read side
-   (`pkg_email_authorize`, `pkg_email_search_emails`,
-   `pkg_email_list_inbox`, `pkg_email_read_email`),
-   write side (`pkg_email_send_email`, `pkg_email_archive_email`,
-   `pkg_email_mark_read_email`, `pkg_email_draft_email`),
-   and allowlist mutation (`pkg_email_trust_sender`,
-   `pkg_email_untrust_sender`).
+   (`pkg_gmail_authorize`, `pkg_gmail_search_emails`,
+   `pkg_gmail_list_inbox`, `pkg_gmail_read_email`),
+   write side (`pkg_gmail_send_email`, `pkg_gmail_archive_email`,
+   `pkg_gmail_mark_read_email`, `pkg_gmail_draft_email`),
+   and allowlist mutation (`pkg_gmail_trust_sender`,
+   `pkg_gmail_untrust_sender`).
 5. Seeds four KB articles under `email/*`.
 6. Presents two allowlist additions
    (`gmail.googleapis.com`, `oauth2.googleapis.com`) for your one-time
@@ -181,7 +181,7 @@ deployment), paste the **client_id** and **client_secret** from §1.4.
 The platform stores them under `GMAIL_OAUTH_CLIENT_ID` and
 `GMAIL_OAUTH_CLIENT_SECRET` in `.env`.
 
-**Expected outcome:** "carpenter-email installed" + you've approved
+**Expected outcome:** "carpenter-gmail installed" + you've approved
 both allowlist entries + you've supplied the OAuth client creds.
 You're now ready to authorize a mailbox.
 
@@ -197,7 +197,7 @@ In chat:
 
 > **You:** "Authorize my Gmail account."
 
-The agent calls `pkg_email_authorize` and replies with a URL plus an
+The agent calls `pkg_gmail_authorize` and replies with a URL plus an
 instructions blob:
 
 > **Agent:** "Open this URL in a browser:
@@ -207,14 +207,14 @@ instructions blob:
 > automatically."
 
 Click the URL. Google walks you through the standard "Sign in" →
-"Choose account" → "carpenter-email wants to access your Google
+"Choose account" → "carpenter-gmail wants to access your Google
 Account" consent screen. (If you set up the consent screen as a
 testing app, Google will warn you the app is unverified — that's
 expected; click "Continue" or "Advanced → Go to ... (unsafe)" because
 you are the developer.)
 
 After consent, Google redirects to your `{public_base_url}/api/oauth/
-callback/carpenter-email`. The platform's callback handler:
+callback/carpenter-gmail`. The platform's callback handler:
 
 - Validates the one-shot state token (defends against CSRF).
 - Verifies the callback's `package_name` matches the in-flight authorize
@@ -239,7 +239,7 @@ Time to try the read pipeline. Ask a question that needs the inbox:
 > **You:** "Search my inbox for anything about invoices from the last
 > two weeks."
 
-The agent calls `pkg_email_search_emails(query="newer_than:14d
+The agent calls `pkg_gmail_search_emails(query="newer_than:14d
 invoice")`. (`query` uses standard
 [Gmail search syntax](https://support.google.com/mail/answer/7190).)
 You'll see something like:
@@ -270,7 +270,7 @@ of the three read templates based on what kind of message it is:
 > **You:** "Read the top invoice result."
 
 The agent calls
-`pkg_email_read_email(provider_message_id="...", kind="order_confirmation")`.
+`pkg_gmail_read_email(provider_message_id="...", kind="order_confirmation")`.
 That spins up a four-arc tree:
 
 - **PLANNER (trusted)** — builds an `EmailReviewBriefing` from the
@@ -312,7 +312,7 @@ characters the JUDGE bans. The chat agent reports a rejection reason:
 
 > **Agent:** "Couldn't read that message: extract was rejected
 > ('from_address `bob@unknown.example` not in email allowlist'). If
-> you trust this sender, run `pkg_email_trust_sender` and ask again."
+> you trust this sender, run `pkg_gmail_trust_sender` and ask again."
 
 The arc tree is marked failed; no data crosses U→T. That's the
 guarantee.
@@ -327,7 +327,7 @@ outbound effect, not an ingress), but with similar trust gates.
 > **You:** "Send Alice a quick note saying I got the package."
 
 The agent calls
-`pkg_email_send_email(to=["alice@example.com"], subject="Got the
+`pkg_gmail_send_email(to=["alice@example.com"], subject="Got the
 package", body="Just confirming I received it.")`. Three gates fire
 in order:
 
@@ -336,9 +336,9 @@ in order:
    `SecurityPolicies.email`. If any address isn't allowlisted, the
    tool returns an error immediately ("recipient
    `alice@example.com` is not in the email allowlist; use
-   `pkg_email_trust_sender` to add"). No work is queued.
+   `pkg_gmail_trust_sender` to add"). No work is queued.
 2. **Chat-boundary human confirm.** Because
-   `pkg_email_send_email` declares `requires_user_confirm=True`, the
+   `pkg_gmail_send_email` declares `requires_user_confirm=True`, the
    chat agent shows you the full draft (recipients, subject, body)
    and asks "OK to send?" — you have to explicitly approve.
 3. **In-script expected-account check.** Inside the untrusted
@@ -359,8 +359,8 @@ success back through the arc-completion notify channel:
 ## 6.5 First use — archive and mark-read (Phase 1.5)
 
 > **Note (v0.3.0, Phase 1.5 v2).** All four write tools
-> (`pkg_email_send_email`, `pkg_email_archive_email`,
-> `pkg_email_mark_read_email`, `pkg_email_draft_email`) now run
+> (`pkg_gmail_send_email`, `pkg_gmail_archive_email`,
+> `pkg_gmail_mark_read_email`, `pkg_gmail_draft_email`) now run
 > through the full PLANNER -> EXECUTOR -> REVIEWER -> JUDGE
 > graduation pipeline.  The Gmail HTTP response is written as an
 > *untrusted* Resource by the EXECUTOR, a constrained REVIEWER
@@ -376,12 +376,12 @@ ever copying body content back into chat context.
 
 > **You:** "Archive the invoice I just read."
 
-The agent calls `pkg_email_archive_email(provider_message_id="...")`
+The agent calls `pkg_gmail_archive_email(provider_message_id="...")`
 with the id it already has from the read pipeline. Three gates fire,
 mirroring send:
 
 1. **Chat-boundary human confirm.** Because
-   `pkg_email_archive_email` declares `requires_user_confirm=True`,
+   `pkg_gmail_archive_email` declares `requires_user_confirm=True`,
    the agent shows you "Archive message id `...` from Gmail?" and
    waits for your approval.
 2. **In-script expected-account check.** Inside the untrusted
@@ -396,7 +396,7 @@ mirroring send:
 
 > **Agent:** "Archived (was_already_archived: false)."
 
-`pkg_email_mark_read_email` is structurally identical — same trust
+`pkg_gmail_mark_read_email` is structurally identical — same trust
 gates, same idempotency, just removes the `UNREAD` label instead.
 
 There is deliberately **no batch archive** or **batch mark-read**
@@ -410,7 +410,7 @@ chain of approvals, not a single yes-to-200-messages.
 
 ## 6.6 First use — drafts (Phase 1.5)
 
-`pkg_email_draft_email` stages a message in your Gmail Drafts folder
+`pkg_gmail_draft_email` stages a message in your Gmail Drafts folder
 without sending it. It's the "I want to compose this carefully"
 escape hatch — useful when the chat agent should produce a first
 draft for you to edit by hand before sending.
@@ -419,7 +419,7 @@ draft for you to edit by hand before sending.
 > language."
 
 The agent calls
-`pkg_email_draft_email(to=["alice@example.com"], subject="...",
+`pkg_gmail_draft_email(to=["alice@example.com"], subject="...",
 body="...")`. Three gates fire:
 
 1. **In-tool allowlist check.** Recipients are validated against
@@ -438,11 +438,11 @@ Important things drafts do NOT do in Phase 1.5:
 
 - **No update-draft tool.** If you want to revise a draft, ask the
   agent to delete the old one in Gmail manually and create a new one.
-  We don't ship `pkg_email_update_draft` because the natural use case
+  We don't ship `pkg_gmail_update_draft` because the natural use case
   (LLM tweaks a draft you already approved) would let body content
   drift past the original chat-boundary confirm.
 - **No send-draft tool.** Once you're happy with a draft, send it by
-  re-running `pkg_email_send_email` with the same recipients /
+  re-running `pkg_gmail_send_email` with the same recipients /
   subject / body. The chat-boundary confirm runs again on the body
   the user actually approves at send time, not on whatever happens
   to be in the Drafts folder. (You can also send the draft directly
@@ -462,7 +462,7 @@ exactly where its limits are:
 - **Never trusts a sender you didn't trust.** The
   `SecurityPolicies.email` allowlist is the only way an email's
   `from_address` becomes a valid `EmailPolicy` literal. Until you've
-  called `pkg_email_trust_sender("...")`, every message from that
+  called `pkg_gmail_trust_sender("...")`, every message from that
   sender will be rejected at JUDGE time. Phase 1 ships **zero**
   bootstrap senders.
 - **Never reads attachments.** Phase 1 fetches `format=full` from
@@ -478,14 +478,14 @@ exactly where its limits are:
   it to act on those strings, do so explicitly in a new chat turn.)
 - **Never sends to a non-allowlisted recipient.** The chat-tool
   allowlist check is belt-and-braces, and the `EmailPolicy`
-  literal validation in `pkg_email_send_email`'s recipient list is
+  literal validation in `pkg_gmail_send_email`'s recipient list is
   what makes that check load-bearing.
 - **Never bypasses the chat-boundary confirm** for sends or for
   allowlist mutations. Those always show you the full draft / address.
 
 What it **does** rely on you to do:
 
-- Be honest about which senders you trust (`pkg_email_trust_sender`
+- Be honest about which senders you trust (`pkg_gmail_trust_sender`
   is a one-way ratchet against the threat-model's "trusted senders
   accumulate" attack — keep the list short).
 - Read displayed body summaries with appropriate skepticism. The
@@ -510,12 +510,12 @@ client ID/secret.
 The redirect URI in your Google Cloud OAuth client doesn't match what
 the platform sent. Open Google Cloud Console → Credentials → your
 OAuth client and confirm the **Authorized redirect URI** is exactly
-`{public_base_url}/api/oauth/callback/carpenter-email` — including the
+`{public_base_url}/api/oauth/callback/carpenter-gmail` — including the
 `https://`, including the port if non-default, no trailing slash.
 
 ### Browser shows "expected_account_email is not configured"
 
-You haven't completed `pkg_email_authorize` yet. The chat tools are
+You haven't completed `pkg_gmail_authorize` yet. The chat tools are
 deliberately fail-closed when the expected mailbox is unknown —
 without it, the T1 envelope-recipient check can't be enforced.
 
@@ -524,8 +524,8 @@ without it, the T1 envelope-recipient check can't be enforced.
 
 The OAuth refresh token in `.env` belongs to a different Google
 account than `GMAIL_OAUTH_ACCOUNT_EMAIL`. This usually means you
-authorized one account, then re-ran `pkg_email_authorize` and picked
-a different one mid-flow. Re-run `pkg_email_authorize` and pick the
+authorized one account, then re-ran `pkg_gmail_authorize` and picked
+a different one mid-flow. Re-run `pkg_gmail_authorize` and pick the
 same account you want listed as `GMAIL_OAUTH_ACCOUNT_EMAIL`. If you
 deliberately want to change which mailbox is connected, you'll need
 to update `GMAIL_OAUTH_ACCOUNT_EMAIL` in `.env` to match.
@@ -535,7 +535,7 @@ to update `GMAIL_OAUTH_ACCOUNT_EMAIL` in `.env` to match.
 This is the JUDGE rejecting an extract because the sender isn't in
 `SecurityPolicies.email`. Three options:
 
-- If you trust this sender: `pkg_email_trust_sender("bob@example.com")`
+- If you trust this sender: `pkg_gmail_trust_sender("bob@example.com")`
   and ask again. (Goes through human-confirm.)
 - If you don't trust them but want to see who it's from: the rejection
   reason in chat already tells you the sender address and the subject
@@ -553,11 +553,11 @@ particular message through Phase 1's templates; this is by design
 attempts). If you really need the message, fetch it manually through
 your Gmail web client.
 
-### `pkg_email_search_emails` returns but no follow-up read happens
+### `pkg_gmail_search_emails` returns but no follow-up read happens
 
 Phase 1's search runs the EXECUTOR to produce a message-ID list but
 the per-message read fan-out is currently manual: the chat agent
-should pick a few of the returned IDs and call `pkg_email_read_email`
+should pick a few of the returned IDs and call `pkg_gmail_read_email`
 on each. Automatic fan-out is on the Phase 1.5 list.
 
 ---

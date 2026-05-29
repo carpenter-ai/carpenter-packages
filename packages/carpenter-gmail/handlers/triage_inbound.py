@@ -2,7 +2,7 @@
 
 Wiring (Phase 3a PR-C):
 
-* :class:`carpenter_email.triggers.gmail_poll.GmailPollTrigger` emits
+* :class:`carpenter_gmail.triggers.gmail_poll.GmailPollTrigger` emits
   ``email.received`` events with a minimal payload
   (``provider_message_id``, ``received_history_id``, ``account``).
 * The manifest's ``trigger_subscriptions`` routes each event to
@@ -12,7 +12,7 @@ Wiring (Phase 3a PR-C):
   with the provider_message_id so the package's Gmail fetch script
   picks the right message.
 
-The actual arc-tree shape mirrors :func:`carpenter_email.tools._create_read_arc_tree`
+The actual arc-tree shape mirrors :func:`carpenter_gmail.tools._create_read_arc_tree`
 — see that helper for the security rationale (raw_email Resource is
 untrusted; briefing Resource is born-trusted via PLANNER; extract
 Resource is pending until the JUDGE flips its verdict).
@@ -57,7 +57,7 @@ def handle_email_received(payload: dict[str, Any]) -> None:
     account = payload.get("account") or ""
     history_id = payload.get("received_history_id") or ""
     try:
-        from carpenter_email.tools import _create_triage_arc_tree
+        from carpenter_gmail.tools import _create_triage_arc_tree
     except ImportError:
         # Tools module not importable (would happen in a stripped test
         # build).  Log and bail — production never hits this branch.

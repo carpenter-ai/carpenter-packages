@@ -1,4 +1,4 @@
-"""Data models for the carpenter-email review pipelines.
+"""Data models for the carpenter-gmail review pipelines.
 
 Every kind here is reserved at install time via the manifest's
 ``data_models:`` section and consumed by the JUDGE-dispatch
@@ -358,7 +358,7 @@ class EmailOrderConfirmationExtract(_EmailExtractBase):
 
 @dataclass(frozen=True)
 class EmailSendResult:
-    """Receipt from ``pkg_email_send_email``.
+    """Receipt from ``pkg_gmail_send_email``.
 
     Attributes:
         status: Always the literal ``"sent"`` on graduation; the JUDGE
@@ -388,7 +388,7 @@ class EmailSendResult:
 
 @dataclass(frozen=True)
 class EmailArchiveResult:
-    """Receipt from ``pkg_email_archive_email``.
+    """Receipt from ``pkg_gmail_archive_email``.
 
     Attributes:
         status: Literal ``"archived"`` on graduation.
@@ -411,7 +411,7 @@ class EmailArchiveResult:
 
 @dataclass(frozen=True)
 class EmailMarkReadResult:
-    """Receipt from ``pkg_email_mark_read_email``.
+    """Receipt from ``pkg_gmail_mark_read_email``.
 
     Attributes:
         status: Literal ``"marked_read"`` on graduation.
@@ -433,7 +433,7 @@ class EmailMarkReadResult:
 
 @dataclass(frozen=True)
 class EmailDraftResult:
-    """Receipt from ``pkg_email_draft_email``.
+    """Receipt from ``pkg_gmail_draft_email``.
 
     Attributes:
         status: Literal ``"drafted"`` on graduation.

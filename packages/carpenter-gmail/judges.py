@@ -1,4 +1,4 @@
-"""Deterministic JUDGE handlers for the carpenter-email read templates.
+"""Deterministic JUDGE handlers for the carpenter-gmail read templates.
 
 Each handler runs after the JUDGE-dispatch wrapper has already
 validated the dataclass's PolicyLiteral fields against
@@ -48,7 +48,7 @@ from .data_models import (
 
 # We import the extract dataclasses via the package-relative path so
 # this module and ``data_models`` are loaded under the SAME namespaced
-# slot in ``sys.modules`` (``_carpenter_pkg_.carpenter-email.data_models``).
+# slot in ``sys.modules`` (``_carpenter_pkg_.carpenter-gmail.data_models``).
 # The platform's ``_import_package_module`` loader (which is what loads
 # both this file and ``data_models``) ensures these class objects are
 # identical to the ones the JUDGE-dispatch wrapper passes us, so
