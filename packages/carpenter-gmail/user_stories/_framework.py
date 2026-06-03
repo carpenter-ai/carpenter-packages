@@ -173,7 +173,6 @@ def ensure_carpenter_on_path() -> None:
 
     candidates = (
         os.environ.get("CARPENTER_CORE_REPO", ""),
-        "/media/jabenta/carpenter/repo",
         str(Path.home() / "repos" / "carpenter-core"),
     )
     for candidate in candidates:
@@ -183,8 +182,10 @@ def ensure_carpenter_on_path() -> None:
         if p.is_dir() and (p / "carpenter" / "__init__.py").is_file():
             sys.path.insert(0, str(p))
             return
-    # If we couldn't find it, leave sys.path alone — the import error
-    # in the story will be informative.
+    # If we couldn't find it, leave sys.path alone — the subsequent
+    # ``import carpenter`` will raise ImportError; the caller can set
+    # ``CARPENTER_CORE_REPO`` to point at a checkout or pip-install the
+    # ``carpenter-ai`` package to resolve it.
 
 
 def load_package_module(name: str):
