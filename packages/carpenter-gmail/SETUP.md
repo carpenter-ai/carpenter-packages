@@ -4,8 +4,7 @@ This is the end-user guide for the `carpenter-gmail` package. It walks
 you from a fresh Carpenter install through to "I can send and receive
 mail through my chat agent". If you're a package developer looking for
 the design / trust model, read [`README.md`](README.md) and the
-[build plan](https://rainbow-forge.duckdns.org:3000/ben-harack/carpenter-core/src/branch/main/docs/2026-05-06_carpenter-email-build-plan.md)
-in carpenter-core instead.
+[design doc](docs/design.md) instead.
 
 Phase 1 + 1.5 (the version that's shipped, v0.2.0) gives you these
 capabilities:
@@ -571,8 +570,6 @@ If you want more capabilities than Phase 1 ships:
 - **Attachments** — separate design, no schedule yet.
 
 For the design rationale behind everything above (especially "why is
-the read pipeline that elaborate?"), read the build plan in
-carpenter-core at
-`docs/2026-05-06_carpenter-email-build-plan.md`. The "Implementation
-status" section at the bottom is the up-to-date map of what shipped vs
-what's still designed-only.
+the read pipeline that elaborate?"), read [`docs/design.md`](docs/design.md).
+The "Phase history" section there is the up-to-date map of what
+shipped when.

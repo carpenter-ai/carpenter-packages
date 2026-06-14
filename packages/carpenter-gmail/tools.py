@@ -6,9 +6,7 @@ both fan out arc batches into the package's PLANNER -> EXECUTOR ->
 REVIEWER -> JUDGE pipeline so every U->T graduation passes through a
 deterministic JUDGE handler.
 
-Design notes (see ``docs/2026-05-06_carpenter-email-build-plan.md``
-in carpenter-core and the Phase 1.5 v2 plan at
-``notes/phase-1.5-plan-v2.md``):
+Design notes (see ``docs/design.md`` for the full architecture write-up):
 
 * The chat agent never sees raw email bodies.  All read paths route
   through a templated REVIEWER + deterministic JUDGE that graduates
