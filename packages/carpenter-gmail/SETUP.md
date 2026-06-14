@@ -119,11 +119,10 @@ Under **Authorized redirect URIs**, add one URI:
 ```
 
 `{public_base_url}` is whatever URL your Carpenter instance is reachable
-at from your browser — for a typical Pi setup that's something like
-`https://rainbow-forge.duckdns.org:3080` (the session-platform port),
-but it'll be different for your deployment. The path
-(`/api/oauth/callback/carpenter-gmail`) is fixed and is what the
-platform's generic OAuth callback handler listens on.
+at from your browser — for example `https://carpenter.example.com` or
+`https://your-host.duckdns.org:PORT`. The exact value depends on your
+deployment. The path (`/api/oauth/callback/carpenter-gmail`) is fixed
+and is what the platform's generic OAuth callback handler listens on.
 
 If you don't know your public base URL: open Carpenter in your
 browser, look at the address bar, and copy everything before the

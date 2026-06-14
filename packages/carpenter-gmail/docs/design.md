@@ -238,7 +238,7 @@ index JUDGE shared across the three index templates.
 
 ### Worked end-to-end
 
-1. Ben: *"any new invoices?"*
+1. User: *"any new invoices?"*
 2. Chat agent calls `pkg_gmail_search_emails(q="newer_than:7d invoice")`.
 3. The tool creates an arc batch: PLANNER → EXECUTOR (untrusted) →
    per-message REVIEWER (constrained) → JUDGE (one per REVIEWER).
