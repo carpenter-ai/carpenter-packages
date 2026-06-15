@@ -98,4 +98,4 @@ Future phases (not in this package):
   alternative, attachment metadata surfacing.
 * Hypothetical 2.5: batch / thread modify operations.
 
-See the build plan in carpenter-core/docs (PR #310).
+See [`docs/design.md`](docs/design.md) for the full architecture.

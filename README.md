@@ -49,10 +49,17 @@ Capability packages are **opinionated configuration**, not security
 mechanism.  The framework forbids packages from:
 
 - declaring chat tools at the `platform` trust boundary (I10),
-- shipping JUDGE code (I3),
+- shipping JUDGE code (I3) — JUDGE handlers run platform-controlled
+  deterministic Python, intercepted at arc dispatch,
 - pre-populating policy allowlists (I9),
 - bundling `.env` files (credentials are user input at install time),
 - seeding KB articles outside the package's declared namespace.
 
-See `carpenter-core/docs/trust-invariants.md` and
-`carpenter-core/docs/2026-04-30_d8-capability-package-phase-a-plan.md`.
+The `I1`–`I10` invariant identifiers refer to Carpenter's trust
+boundary system: untrusted data (e.g. an email body) can only become
+trusted after a deterministic JUDGE arc approves a structured extract
+of it (I3), and chat tools have enforced trust boundaries and
+capability lists (I10). Per-package design docs (e.g.
+[`packages/carpenter-gmail/docs/design.md`](packages/carpenter-gmail/docs/design.md))
+explain how a given package threads these invariants for its
+particular ingress.
