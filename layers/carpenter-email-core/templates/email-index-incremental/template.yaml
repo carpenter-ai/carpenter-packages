@@ -1,0 +1,50 @@
+name: email_index_incremental
+description: |
+  Incremental phase of the carpenter-gmail semantic resource index
+  (Phase 4 PR-A).  Picks up newly-arrived messages by walking
+  Gmail's ``users.history.list`` from a stored historyId watermark.
+
+  Distinct from the Phase 3a triage trigger because this one writes
+  vectors (not chat-notify events) and operates in batches of <=25.
+  The incremental phase runs continuously once Phase 1 backfill
+  completes; the trigger picks the next-history-page on each tick.
+
+  Pipeline shape: PLANNER -> EXECUTOR (untrusted; pre-verified
+  history.list script) -> REVIEWER (static prompt; no KB) -> JUDGE
+  (deterministic Python).
+steps:
+  - name: prepare-briefing
+    description: |
+      Construct EmailReviewBriefing from the SecurityPolicies.email
+      allowlist snapshot and the static suspicious-keyword list, then
+      derive_resource it as born-trusted.
+    order: 0
+    agent_type: PLANNER
+    model_policy: fast-chat
+  - name: fetch-batch
+    description: |
+      Untrusted EXECUTOR step.  Submits
+      carpenter_gmail.scripts.GMAIL_INDEX_INCREMENTAL_SCRIPT verbatim
+      via submit_code.  The script walks Gmail history.list from a
+      pre-seeded ``start_history_id`` and writes the result JSON
+      (including any ``history_expired`` pause signal) to the raw
+      Resource on disk.
+    order: 1
+    agent_type: EXECUTOR
+    integrity_level: untrusted
+    model_policy: background-batch
+  - name: review-batch
+    description: |
+      Constrained REVIEWER step with a static prompt shipped from the
+      package (reviewer.txt).  Writes one EmailIndexFetchedBatch
+      Resource via derive_resource.  No KB access.
+    order: 2
+    agent_type: REVIEWER
+    model_policy: careful-coding
+    arc_role: verifier
+  - name: judge-batch
+    description: |
+      Deterministic JUDGE step — dispatches to
+      ``judges:judge_email_index_fetched_batch``.  No AI agent.
+    order: 3
+    agent_type: JUDGE

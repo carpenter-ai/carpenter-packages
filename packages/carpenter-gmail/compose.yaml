@@ -1,0 +1,22 @@
+# Composition descriptor for the carpenter-gmail leaf package.
+#
+# The tools/compose.py build step materialises this package from the
+# ordered list of shared layers below, then overlays the leaf's own
+# (Gmail-specific) files on top.  See layers/README.md for the model
+# and the DEFERRED cutover steps this scaffolding does NOT yet do.
+#
+# NOTE (this PR is additive scaffolding only): the gmail package still
+# physically ships its own copies of every layer-contributed file.
+# `python -m tools.compose verify packages/carpenter-gmail` proves
+# those copies are byte-identical to the layer — i.e. the extraction
+# into carpenter-email-core is faithful.  Removing the duplicates and
+# generating them via compose at build/install time is a separate,
+# reviewed follow-up.
+compose_from:
+  - carpenter-email-core   # ordered list of layer names under layers/
+
+# Explicit allowlist of relative paths where the leaf may override a
+# file already placed by a layer.  Empty: the gmail copies are exact
+# duplicates of the layer, so no override is needed (or wanted — an
+# undeclared collision must stay loud).
+overrides: []
