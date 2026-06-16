@@ -1,5 +1,5 @@
 name: carpenter-imap-email
-version: "0.1.1"
+version: "0.2.0"
 description: |
   Email assistant package (IMAP/SMTP backend).  The first real consumer
   of Carpenter's package-capability framework: instead of reaching the
@@ -35,12 +35,30 @@ description: |
     Gmail's API): the send flow dispatches smtp.send THEN imap.append
     (folder=Sent) so a server-side Sent copy exists.
 
-  DEFERRED to v0.2.0 (NOT declared here): the inbound UID-poll trigger +
-  email.received triage subscription, and the semantic resource index
-  (Phase 4 vector store + the three index triggers).  The shared layer
-  files for those paths are composed in (email-triage / email-index-*
-  templates, triage_inbound.py, kb/inbound-triage.md, kb/index.md) but
-  the manifest deliberately does not wire them up.  See README.md.
+  v0.2.0 (this version) adds the inbound path: an in-process
+  ImapPollTrigger (triggers/imap_poll.py) polls the watched IMAP
+  folder(s) every 15 minutes and emits one email.received event per
+  newly-arrived message.  Because IMAP has no Gmail-style monotonic
+  history cursor, the trigger tracks the highest-seen UID per folder,
+  UIDVALIDITY-aware: it persists {uid, uidvalidity} per folder in
+  package_state and re-baselines (emitting nothing) if the server
+  renumbers the mailbox (UIDVALIDITY change).  First run records the
+  current max UID and emits nothing — historical backfill is out of
+  scope.  The trigger runs in TRUSTED platform context and resolves
+  host + credentials platform-side via resolve_package_secret (the same
+  resolver ctx.secret and the capability loader use), never from an
+  untrusted executor.  Folder policy: INBOX by default, configurable via
+  the trigger's `folders` config; Junk (spam) is NOT watched by default.
+  The email.received subscription routes each event into a per-message
+  email_triage arc tree (PLANNER -> EXECUTOR -> REVIEWER -> JUDGE) which
+  graduates one EmailTriageExtract to chat context — no raw body or
+  header content ever leaves the JUDGE gate.
+
+  STILL DEFERRED (composed in but NOT declared): the semantic resource
+  index (Phase 4 vector store + the three email-index-* triggers /
+  templates).  Those shared-layer files remain composed in (kb/index.md,
+  email-index-* templates) but the manifest deliberately does not wire
+  them up.  See README.md.
 
 chat_tools:
   - tools.py
@@ -119,6 +137,14 @@ arc_templates:
     briefing_kind: EmailReviewBriefing
     extract_kind: EmailDraftResult
     judge_handler: judges:judge_email_draft
+  # v0.2.0: inbound triage template.  Wired into the email.received
+  # subscription below; the trigger's per-message events fan out into
+  # one of these arc trees.  Same backend-agnostic shape as carpenter-gmail.
+  - name: email_triage
+    path: templates/email-triage/template.yaml
+    briefing_kind: EmailReviewBriefing
+    extract_kind: EmailTriageExtract
+    judge_handler: judges:judge_email_triage
 
 # Deterministic Python JUDGE handlers, composed from
 # carpenter-email-core (judges.py).  We declare the read + write JUDGES
@@ -164,6 +190,10 @@ kb_articles:
     path: kb/email/style.md
   - slug: email/attachments
     path: kb/email/attachments.md
+  # v0.2.0: inbound-triage trust contract (composed from the shared
+  # layer).  Seeded now that the email.received subscription is wired.
+  - slug: email/inbound-triage
+    path: kb/email/inbound-triage.md
 
 # TRUSTED platform-side dispatch verbs.  Installing this package grants
 # PLATFORM-LEVEL TRUST: these handlers run parent-side with egress +
@@ -264,3 +294,37 @@ credential_requirements:
       - SMTP_PORT
       - SMTP_USERNAME
       - SMTP_PASSWORD
+
+# v0.2.0 inbound path: an in-process trigger that polls the watched IMAP
+# folder(s) every 15 minutes and emits one email.received event per
+# newly-arrived message UID.  The trigger runs in TRUSTED platform
+# context and resolves host + credentials platform-side via
+# resolve_package_secret(source_package, "EMAIL_IMAP_*") — the SAME
+# resolver the capability loader uses to resolve grant hosts and that
+# ctx.secret uses for handler credentials.  It does NOT fetch message
+# bodies; that is the triage arc's job.
+#
+# Folder policy: INBOX only by default.  The operator MAY add "Junk" to
+# the `folders` list to triage spam, but Junk is NOT watched by default
+# (auto-triaging spam is undesirable).  See kb/email/inbound-triage.md.
+#
+# The semantic-index triggers (Phase 4) remain DEFERRED — not declared.
+triggers:
+  - name: imap-inbound-poll
+    type: imap_poll
+    module: triggers/imap_poll.py
+    enabled: true
+    config:
+      cadence_seconds: 900   # 15 minutes
+      event_type: email.received
+      folders:
+        - INBOX
+
+# v0.2.0: route each email.received event into a triage arc tree.  The
+# handler is the shared shim composed from carpenter-email-core; it
+# spawns the email_triage arc tree via the package's
+# _create_triage_arc_tree wrapper (binds the IMAP fetch script).  Same
+# wiring as carpenter-gmail.
+trigger_subscriptions:
+  - event: email.received
+    handler: handlers.triage_inbound:handle_email_received
