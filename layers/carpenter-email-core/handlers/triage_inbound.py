@@ -2,20 +2,21 @@
 
 Wiring (Phase 3a PR-C):
 
-* :class:`carpenter_gmail.triggers.gmail_poll.GmailPollTrigger` emits
+* The backend's poll trigger (e.g. ``GmailPollTrigger``) emits
   ``email.received`` events with a minimal payload
   (``provider_message_id``, ``received_history_id``, ``account``).
 * The manifest's ``trigger_subscriptions`` routes each event to
   :func:`handle_email_received`.
 * This handler spawns one ``email_triage`` arc tree (PLANNER ->
   EXECUTOR -> REVIEWER -> JUDGE), pre-seeding the EXECUTOR arc state
-  with the provider_message_id so the package's Gmail fetch script
-  picks the right message.
+  with the provider_message_id so the package's fetch script picks
+  the right message.
 
-The actual arc-tree shape mirrors :func:`carpenter_gmail.tools._create_read_arc_tree`
-— see that helper for the security rationale (raw_email Resource is
-untrusted; briefing Resource is born-trusted via PLANNER; extract
-Resource is pending until the JUDGE flips its verdict).
+The actual arc-tree shape mirrors the read arc tree in
+``arc_builders`` — see that helper for the security rationale
+(raw_email Resource is untrusted; briefing Resource is born-trusted
+via PLANNER; extract Resource is pending until the JUDGE flips its
+verdict).
 
 Handlers run on the work queue (the subscription action enqueues a
 ``package.dispatch`` work item); they receive the event payload as a
@@ -37,10 +38,9 @@ def handle_email_received(payload: dict[str, Any]) -> None:
     """Spawn an ``email_triage`` arc tree for one inbound message.
 
     Args:
-        payload: The original event payload from
-            :class:`GmailPollTrigger.emit`.  Expected keys:
-            ``provider_message_id``, ``received_history_id``,
-            ``account``.
+        payload: The original event payload from the backend's poll
+            trigger ``emit``.  Expected keys: ``provider_message_id``,
+            ``received_history_id``, ``account``.
 
     The handler is intentionally narrow: it does NOT fetch the
     message, does NOT classify, does NOT touch chat state.  Its only
@@ -57,20 +57,22 @@ def handle_email_received(payload: dict[str, Any]) -> None:
     account = payload.get("account") or ""
     history_id = payload.get("received_history_id") or ""
     try:
-        from carpenter_gmail.tools import _create_triage_arc_tree
+        # The owning package's ``tools`` module supplies a thin
+        # ``_create_triage_arc_tree`` wrapper that binds the backend's
+        # pre-verified fetch script + raw-source prefix and delegates
+        # to the shared builder in ``arc_builders``.  The relative
+        # import resolves under the platform's package namespace
+        # (``_carpenter_pkg_.<package>.tools``) and under the test
+        # harness, which loads the package via the same loader.
+        from ..tools import _create_triage_arc_tree
     except ImportError:
-        try:
-            # Loaded via carpenter.packages.loaders — relative import
-            # resolves under the platform's namespace.
-            from ..tools import _create_triage_arc_tree  # type: ignore
-        except ImportError:
-            # Tools module not importable (would happen in a stripped test
-            # build).  Log and bail — production never hits this branch.
-            logger.exception(
-                "handle_email_received: cannot import "
-                "_create_triage_arc_tree; skipping message %s", mid,
-            )
-            return
+        # Tools module not importable (would happen in a stripped test
+        # build).  Log and bail — production never hits this branch.
+        logger.exception(
+            "handle_email_received: cannot import "
+            "_create_triage_arc_tree; skipping message %s", mid,
+        )
+        return
     try:
         result = _create_triage_arc_tree(
             provider_message_id=mid,

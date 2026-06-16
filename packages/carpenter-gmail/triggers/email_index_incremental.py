@@ -10,13 +10,13 @@ from __future__ import annotations
 
 from typing import Any
 
-from ._index_common import IndexTriggerBase
+from ._gmail_index_base import GmailIndexTriggerBase
 
 
 _DEFAULT_MAX_BATCH = 25
 
 
-class EmailIndexIncrementalTrigger(IndexTriggerBase):
+class EmailIndexIncrementalTrigger(GmailIndexTriggerBase):
     """Indexes newly-arrived Gmail messages in batches of <=25.
 
     Manifest config keys:

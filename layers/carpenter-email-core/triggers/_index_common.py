@@ -18,9 +18,8 @@ Design properties (cross-reference ``phase-4-plan.md`` D5, D8, D12):
   ``package_state`` / ``package_vectors`` injection.
 * **Per-package E1 invariant**.  Vector floats never appear in any
   trusted-context string.  The trigger reads scores back from
-  ``embed_and_search`` but only at chat-tool surface in
-  :mod:`carpenter_gmail.tools` — this module deals only in embed
-  inputs and upsert ids/metadata.
+  ``embed_and_search`` but only at the package's chat-tool surface —
+  this module deals only in embed inputs and upsert ids/metadata.
 """
 
 from __future__ import annotations
@@ -99,13 +98,22 @@ def make_batch_id() -> str:
 
 
 class IndexTriggerBase(PollableTrigger):
-    """Common base for all three carpenter-gmail index triggers.
+    """Common base for all email-index triggers (backend-agnostic).
 
     Subclasses provide:
 
     * :attr:`phase` — one of ``"1"`` / ``"2"`` / ``"incremental"``.
     * :attr:`max_batch` — per-tick fetch cap.
     * :attr:`template_name` — manifest arc template to spawn.
+    * :attr:`account_email_state_key` — the ``package_state`` key under
+      which the backend's poll trigger caches the authorised mailbox
+      address (e.g. gmail caches it under ``gmail_account_email``).
+    * :attr:`raw_source_prefix` — the audit ``source_descriptor``
+      prefix for the untrusted raw-fetch Resource (e.g. ``"gmail"``).
+    * :meth:`index_template_meta` — resolve a template name to its
+      ``(extract_kind, executor_script)`` pair.  The script is the
+      pre-verified, backend-specific EXECUTOR code; this layer never
+      imports a backend's ``scripts`` module.
     * :meth:`build_executor_seed` — phase-specific arc-state keys.
 
     The base class handles cadence, pause, mutex, drain, embed+upsert,
@@ -116,6 +124,10 @@ class IndexTriggerBase(PollableTrigger):
     max_batch: int = 25        # subclass override
     template_name: str = ""    # subclass override
     event_type_status: str = "email.index.status"
+    # Backend-specific: the package_state key holding the authorised
+    # mailbox address, and the raw-Resource source_descriptor prefix.
+    account_email_state_key: str = ""   # subclass override
+    raw_source_prefix: str = "email"    # subclass override
 
     def __init__(
         self,
@@ -367,16 +379,10 @@ class IndexTriggerBase(PollableTrigger):
         from carpenter.core.resources import (
             read_resource_content as _read_resource_content,
         )
-        try:
-            from carpenter_gmail.data_models import (
-                EmailIndexFetchedBatch,
-                EMAIL_INDEX_MAX_BATCH,
-            )
-        except ImportError:
-            from .data_models import (  # type: ignore
-                EmailIndexFetchedBatch,
-                EMAIL_INDEX_MAX_BATCH,
-            )
+        from ..data_models import (
+            EmailIndexFetchedBatch,
+            EMAIL_INDEX_MAX_BATCH,
+        )
 
         # Load the JUDGE-graduated extract.  ``read_resource_content``
         # returns the file text; deserialise the dataclass via the
@@ -442,10 +448,7 @@ class IndexTriggerBase(PollableTrigger):
 
         # Write an audit receipt to package_state so the chat agent
         # can introspect indexing progress.
-        try:
-            from carpenter_gmail.data_models import EmailIndexBatchReceipt
-        except ImportError:
-            from .data_models import EmailIndexBatchReceipt  # type: ignore
+        from ..data_models import EmailIndexBatchReceipt
         receipt = EmailIndexBatchReceipt(
             phase=batch.phase,
             batch_id=batch.batch_id,
@@ -504,10 +507,7 @@ class IndexTriggerBase(PollableTrigger):
         from dataclasses import fields, is_dataclass
         if not is_dataclass(klass):
             raise RuntimeError(f"{klass!r} is not a dataclass")
-        try:
-            from carpenter_gmail.data_models import EmailIndexFetchedEntry
-        except ImportError:
-            from .data_models import EmailIndexFetchedEntry  # type: ignore
+        from ..data_models import EmailIndexFetchedEntry
         entries_raw = data.get("entries") or ()
         entry_fields = {f.name for f in fields(EmailIndexFetchedEntry)}
         entries = tuple(
@@ -681,21 +681,20 @@ class IndexTriggerBase(PollableTrigger):
         """Spawn one arc tree for this phase.  Subclasses override
         :meth:`build_executor_seed` to provide phase-specific inputs.
         """
-        # Read the expected-account email (cached by gmail_poll under
-        # KEY_ACCOUNT_EMAIL, or empty if unauthorised yet).
+        # Read the expected-account email (cached by the backend's
+        # poll trigger under ``account_email_state_key``, or empty if
+        # unauthorised yet).  The concrete trigger subclass supplies
+        # the package_state key name (see :attr:`account_email_state_key`).
+        account_key = self.account_email_state_key
         try:
-            from carpenter_gmail.triggers.gmail_poll import _KEY_ACCOUNT_EMAIL
-        except ImportError:
-            from .gmail_poll import _KEY_ACCOUNT_EMAIL  # type: ignore
-        try:
-            account = self.package_state.get(_KEY_ACCOUNT_EMAIL) or ""
+            account = self.package_state.get(account_key) or ""
         except Exception:
             account = ""
         if not account:
             logger.debug(
-                "%s: no GMAIL_OAUTH_ACCESS_TOKEN account on record yet; "
+                "%s: no mailbox account on record yet (state key %r); "
                 "deferring",
-                self.name,
+                self.name, account_key,
             )
             self._release_running_lock()
             return
@@ -724,10 +723,12 @@ class IndexTriggerBase(PollableTrigger):
 
         batch_id = make_batch_id()
 
-        try:
-            from carpenter_gmail.tools import _create_index_arc_tree
-        except ImportError:
-            from .tools import _create_index_arc_tree  # type: ignore
+        # Resolve the backend-specific EXECUTOR script + extract kind
+        # for this template via the subclass hook, then build the arc
+        # tree with the shared, backend-agnostic builder.
+        extract_kind, script = self.index_template_meta(self.template_name)
+
+        from ..arc_builders import _create_index_arc_tree
         result = _create_index_arc_tree(
             template_name=self.template_name,
             phase=self.phase,
@@ -736,6 +737,9 @@ class IndexTriggerBase(PollableTrigger):
             expected_account_email=account,
             model_identity=model_identity,
             executor_state_seed=seed,
+            script=script,
+            extract_kind=extract_kind,
+            raw_source_prefix=self.raw_source_prefix,
         )
         if "error" in result:
             logger.warning(
@@ -771,5 +775,17 @@ class IndexTriggerBase(PollableTrigger):
         """Return phase-specific arc-state keys to pre-seed on the
         EXECUTOR.  ``None`` means there is nothing to do this tick
         (e.g. Phase 2 has no candidate ids).
+        """
+        raise NotImplementedError
+
+    # Subclass hook.
+    def index_template_meta(self, template_name: str) -> tuple[str, str]:
+        """Return ``(extract_kind, executor_script)`` for a template.
+
+        ``extract_kind`` is the graduating dataclass kind the REVIEWER
+        derives (``EmailIndexFetchedBatch`` for every index template).
+        ``executor_script`` is the backend's pre-verified EXECUTOR
+        code body.  The layer never imports a backend's ``scripts``
+        module, so the concrete (leaf) trigger supplies this.
         """
         raise NotImplementedError

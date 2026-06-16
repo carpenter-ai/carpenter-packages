@@ -13,13 +13,13 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from ._index_common import IndexTriggerBase
+from ._gmail_index_base import GmailIndexTriggerBase
 
 
 _DEFAULT_MAX_BATCH = 50
 
 
-class EmailIndexPhase2Trigger(IndexTriggerBase):
+class EmailIndexPhase2Trigger(GmailIndexTriggerBase):
     """Re-indexes message bodies for a list of message ids stored
     under ``index_phase2_candidates`` in :mod:`package_state`.
 

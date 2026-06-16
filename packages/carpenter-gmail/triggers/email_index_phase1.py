@@ -9,13 +9,13 @@ from __future__ import annotations
 
 from typing import Any
 
-from ._index_common import IndexTriggerBase
+from ._gmail_index_base import GmailIndexTriggerBase
 
 
 _DEFAULT_MAX_BATCH = 100  # JUDGE-enforced ceiling per data_models
 
 
-class EmailIndexPhase1Trigger(IndexTriggerBase):
+class EmailIndexPhase1Trigger(GmailIndexTriggerBase):
     """Polls Gmail for messages older than the current Phase-1
     watermark in batches of <=100.
 
