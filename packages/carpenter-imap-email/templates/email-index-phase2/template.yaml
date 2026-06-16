@@ -1,0 +1,52 @@
+name: email_index_phase2
+description: |
+  Phase 2 of the carpenter-gmail semantic resource index (Phase 4 PR-A).
+  Re-indexes message bodies for a pre-seeded list of provider message
+  ids (typically the top-N already-indexed messages, in batches of
+  <=50).  Phase 2 enriches the existing vector entries with body
+  text; Phase 1 stores metadata-only.
+
+  This is a trigger-spawned pipeline.  The ``email_index_phase2``
+  PollableTrigger fires on a 60-second cadence (after Phase 1
+  reaches its tail) and creates one arc tree per tick.
+
+  Pipeline shape: PLANNER -> EXECUTOR (untrusted; pre-verified Gmail
+  fetch script) -> REVIEWER (static prompt; no KB; only
+  derive_resource) -> JUDGE (deterministic Python).
+steps:
+  - name: prepare-briefing
+    description: |
+      Construct EmailReviewBriefing from the SecurityPolicies.email
+      allowlist snapshot and the static suspicious-keyword list, then
+      derive_resource it as born-trusted.  Trusted PLANNER context.
+    order: 0
+    agent_type: PLANNER
+    model_policy: fast-chat
+  - name: fetch-batch
+    description: |
+      Untrusted EXECUTOR step.  Submits the pre-verified Phase 2 Gmail
+      fetch script (carpenter_gmail.scripts.GMAIL_INDEX_PHASE2_SCRIPT)
+      verbatim via submit_code.  The script reads the message-ids
+      list from arc state, fetches per-message metadata via
+      gmail.users.messages.get (format=metadata), and writes the
+      result JSON to the raw Resource on disk.
+    order: 1
+    agent_type: EXECUTOR
+    integrity_level: untrusted
+    model_policy: background-batch
+  - name: review-batch
+    description: |
+      Constrained REVIEWER step with a static prompt shipped from the
+      package (reviewer.txt).  Reads briefing + raw fetch JSON; writes
+      one pending EmailIndexFetchedBatch Resource via derive_resource.
+      No KB access.
+    order: 2
+    agent_type: REVIEWER
+    model_policy: careful-coding
+    arc_role: verifier
+  - name: judge-batch
+    description: |
+      Deterministic JUDGE step — dispatches to
+      ``judges:judge_email_index_fetched_batch``.  No AI agent.
+    order: 3
+    agent_type: JUDGE
