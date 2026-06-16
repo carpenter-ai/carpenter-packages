@@ -1,0 +1,250 @@
+name: carpenter-imap-email
+version: "0.1.0"
+description: |
+  Email assistant package (IMAP/SMTP backend).  The first real consumer
+  of Carpenter's package-capability framework: instead of reaching the
+  network from inside an untrusted EXECUTOR (the Gmail backend's
+  os.environ + web.get shape), this package declares TRUSTED platform-side
+  dispatch verbs (imap.fetch / imap.search / imap.store / smtp.send) whose
+  handlers run parent-side with egress + credentials.  The untrusted
+  EXECUTOR scripts are CRED-FREE and HOST-FREE — they only
+  dispatch(Label("imap.fetch"), {"uid": ...}) and write the raw result to
+  a Resource.  Host + credentials come from the operator-confirmed grant
+  (CapabilityContext), never from the executor.
+
+  The read/write trust pipeline (data models, JUDGE handlers, arc
+  templates, REVIEWER prompts, trust KB articles) is composed verbatim
+  from the shared carpenter-email-core layer — identical to carpenter-gmail.
+  Only the backend (how bytes are fetched/sent) differs.
+
+  MVP (v0.1.0) ships:
+
+  * Read side: three review templates (simple text, meeting invite,
+    order confirmation) through the full PLANNER -> EXECUTOR -> REVIEWER
+    -> JUDGE untrusted-data graduation pipeline.  The chat agent never
+    sees a raw email body.
+  * Write side: four external-effect templates (send, archive,
+    mark-read, draft) each guarded by a chat-boundary human-confirm and
+    graduated through the same REVIEWER + deterministic JUDGE so a typed
+    EmailXxxResult receipt reaches chat without consuming the raw IMAP
+    response.
+  * Four TRUSTED capability verbs (imap.fetch / imap.search / imap.store
+    / smtp.send) implemented in handlers/imap_smtp.py with stdlib
+    imaplib/smtplib over TLS.
+
+  DEFERRED to v0.2.0 (NOT declared here): the inbound UID-poll trigger +
+  email.received triage subscription, and the semantic resource index
+  (Phase 4 vector store + the three index triggers).  The shared layer
+  files for those paths are composed in (email-triage / email-index-*
+  templates, triage_inbound.py, kb/inbound-triage.md, kb/index.md) but
+  the manifest deliberately does not wire them up.  See README.md.
+
+chat_tools:
+  - tools.py
+
+kb_namespace: email
+
+platform_compatibility:
+  - any
+
+# Trust-graduating dataclasses (D24 SD11), composed from
+# carpenter-email-core.  Same 13 kinds as carpenter-gmail: each read or
+# write template emits its own kind so a malicious REVIEWER cannot
+# upcast one extract into another, nor a receipt into a different
+# receipt.  AttachmentMetadata + the EmailIndex* kinds are sub-components
+# / deferred-feature kinds carried by the shared data_models module; we
+# register them so the dispatch loader can resolve every field
+# annotation in data_models.py even though the index templates are not
+# declared in this MVP.
+data_models:
+  - EmailReviewBriefing
+  - EmailSimpleTextExtract
+  - EmailMeetingInviteExtract
+  - EmailOrderConfirmationExtract
+  - EmailSendResult
+  - EmailArchiveResult
+  - EmailMarkReadResult
+  - EmailDraftResult
+  - EmailTriageExtract
+  - AttachmentMetadata
+  - EmailIndexFetchedEntry
+  - EmailIndexFetchedBatch
+  - EmailIndexBatchReceipt
+
+# Seven templates: three read + four write.  All share the canonical
+# PLANNER -> EXECUTOR (untrusted IMAP/SMTP dispatch) -> REVIEWER
+# (constrained static prompt) -> JUDGE (deterministic Python) shape.
+# The briefing_kind / extract_kind / judge_handler wiring is copied
+# verbatim from carpenter-gmail — it is backend-agnostic (the JUDGE
+# bounds-checks the typed extract regardless of how it was fetched).
+#
+# DEFERRED (composed in but NOT declared): email-triage and the three
+# email-index-* templates.
+arc_templates:
+  - name: email_read_simple_text
+    path: templates/email-read-simple-text/template.yaml
+    briefing_kind: EmailReviewBriefing
+    extract_kind: EmailSimpleTextExtract
+    judge_handler: judges:judge_simple_text
+  - name: email_read_meeting_invite
+    path: templates/email-read-meeting-invite/template.yaml
+    briefing_kind: EmailReviewBriefing
+    extract_kind: EmailMeetingInviteExtract
+    judge_handler: judges:judge_meeting_invite
+  - name: email_read_order_confirmation
+    path: templates/email-read-order-confirmation/template.yaml
+    briefing_kind: EmailReviewBriefing
+    extract_kind: EmailOrderConfirmationExtract
+    judge_handler: judges:judge_order_confirmation
+  - name: email_write_send
+    path: templates/email-write-send/template.yaml
+    briefing_kind: EmailReviewBriefing
+    extract_kind: EmailSendResult
+    judge_handler: judges:judge_email_send
+  - name: email_write_archive
+    path: templates/email-write-archive/template.yaml
+    briefing_kind: EmailReviewBriefing
+    extract_kind: EmailArchiveResult
+    judge_handler: judges:judge_email_archive
+  - name: email_write_mark_read
+    path: templates/email-write-mark-read/template.yaml
+    briefing_kind: EmailReviewBriefing
+    extract_kind: EmailMarkReadResult
+    judge_handler: judges:judge_email_mark_read
+  - name: email_write_draft
+    path: templates/email-write-draft/template.yaml
+    briefing_kind: EmailReviewBriefing
+    extract_kind: EmailDraftResult
+    judge_handler: judges:judge_email_draft
+
+# Deterministic Python JUDGE handlers, composed from
+# carpenter-email-core (judges.py).  We declare the read + write JUDGES
+# this MVP uses plus the triage / index JUDGES the shared module ships
+# (harmless to register; they are pure functions).
+judge_handlers:
+  - name: judge_simple_text
+    module: judges
+  - name: judge_meeting_invite
+    module: judges
+  - name: judge_order_confirmation
+    module: judges
+  - name: judge_email_send
+    module: judges
+  - name: judge_email_archive
+    module: judges
+  - name: judge_email_mark_read
+    module: judges
+  - name: judge_email_draft
+    module: judges
+  - name: judge_email_triage
+    module: judges
+  - name: judge_email_index_fetched_batch
+    module: judges
+  - name: judge_email_index_batch
+    module: judges
+
+# KB articles seeded into kb/email/* on install.  The trust articles
+# (trust-warning, style, attachments) are composed verbatim from the
+# shared layer; overview / policy-setup / search are IMAP-specific leaf
+# files written for this backend.  inbound-triage and index are composed
+# in but NOT seeded (their features are deferred).
+kb_articles:
+  - slug: email/overview
+    path: kb/overview.md
+  - slug: email/policy-setup
+    path: kb/policy-setup.md
+  - slug: email/search
+    path: kb/search.md
+  - slug: email/trust-warning
+    path: kb/trust-warning.md
+  - slug: email/style
+    path: kb/style.md
+  - slug: email/attachments
+    path: kb/attachments.md
+
+# TRUSTED platform-side dispatch verbs.  Installing this package grants
+# PLATFORM-LEVEL TRUST: these handlers run parent-side with egress +
+# credentials, in a DIFFERENT trust class than the package's untrusted
+# EXECUTOR scripts.  The operator confirms each grant interactively at
+# install time.
+#
+# Host + port + protocol are bound from the package's own kind:env
+# credential (host_from references the IMAP_EMAIL_IMAP_HOST /
+# IMAP_EMAIL_SMTP_HOST env values the operator supplies).  Credentials
+# resolve PLATFORM-SIDE via ctx.secret() — never from handler params,
+# never from the untrusted executor's environment.
+#
+# Per-package gating: the package's arc_templates are auto-stamped
+# owner_package=carpenter-imap-email, so their EXECUTOR step arcs carry
+# the pkg.carpenter-imap-email grant and pass the per-package dispatch
+# gate.  Nothing else can invoke these verbs.
+platform_capabilities:
+  - verb: imap.fetch
+    kind: egress
+    module: handlers.imap_smtp
+    handler: handle_imap_fetch
+    grant:
+      protocol: imaps
+      host_from: IMAP_HOST
+      port: 993
+      credential_ref: IMAP_EMAIL
+  - verb: imap.search
+    kind: egress
+    module: handlers.imap_smtp
+    handler: handle_imap_search
+    grant:
+      protocol: imaps
+      host_from: IMAP_HOST
+      port: 993
+      credential_ref: IMAP_EMAIL
+  - verb: imap.store
+    kind: egress
+    module: handlers.imap_smtp
+    handler: handle_imap_store
+    grant:
+      protocol: imaps
+      host_from: IMAP_HOST
+      port: 993
+      credential_ref: IMAP_EMAIL
+  - verb: smtp.send
+    kind: egress
+    module: handlers.imap_smtp
+    handler: handle_smtp_send
+    grant:
+      protocol: smtps
+      host_from: SMTP_HOST
+      port: 465
+      credential_ref: IMAP_EMAIL
+
+# Allowlist proposals.  These mailbox.org hosts are PROVISIONAL /
+# UNCONFIRMED — the production provider + account have not been
+# finalised (see README.md and SETUP.md).  Do NOT treat these as the
+# committed endpoints.  They are proposed (not pre-populated) so the
+# operator still confirms each one at install with the standard
+# human-confirm flow; nothing is silently trusted.  The platform's
+# manifest schema only accepts {type, value}, so the provisional status
+# is documented here in comments rather than as a field.
+allowlist_proposals:
+  - type: domain
+    value: imap.mailbox.org
+  - type: domain
+    value: smtp.mailbox.org
+
+# Environment-variable credential requirement.  At install the operator
+# is prompted for each IMAP_EMAIL_<SUFFIX> value.  These are resolved
+# PLATFORM-SIDE by the capability handlers via ctx.secret(...), NOT
+# injected into the untrusted executor.  IMAP_HOST / SMTP_HOST also
+# supply the egress host for the grants above (grant.host_from).
+credential_requirements:
+  - kind: env
+    provider: imap_smtp
+    env_key_prefix: IMAP_EMAIL
+    required_keys:
+      - IMAP_HOST
+      - IMAP_PORT
+      - IMAP_USERNAME
+      - IMAP_PASSWORD
+      - SMTP_HOST
+      - SMTP_PORT
+      - SMTP_USERNAME
+      - SMTP_PASSWORD

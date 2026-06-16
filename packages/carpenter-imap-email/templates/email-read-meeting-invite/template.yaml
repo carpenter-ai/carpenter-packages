@@ -1,0 +1,41 @@
+name: email_read_meeting_invite
+description: |
+  Read one Gmail meeting-invite message and emit a structured
+  meeting-invite extract.  Same PLANNER -> EXECUTOR -> REVIEWER ->
+  JUDGE shape as email_read_simple_text but the REVIEWER pulls
+  start_at / end_at / location / organizer in addition to the
+  body summary, and the JUDGE checks ISO-8601 well-formedness.
+steps:
+  - name: prepare-briefing
+    description: |
+      Construct EmailReviewBriefing from the global allowlist
+      snapshot.  Trusted PLANNER context.
+    order: 0
+    agent_type: PLANNER
+    model_policy: fast-chat
+  - name: fetch-gmail
+    description: |
+      Untrusted EXECUTOR step.  Pre-verified Gmail-fetch script;
+      writes the response JSON to a raw_email Resource on disk.
+    order: 1
+    agent_type: EXECUTOR
+    integrity_level: untrusted
+    model_policy: background-batch
+  - name: review-extract
+    description: |
+      Constrained REVIEWER step with a static prompt.  Reads
+      briefing + raw email JSON; writes one pending
+      EmailMeetingInviteExtract Resource (with start_at, end_at,
+      location, organizer, body_summary, flags) via derive_resource.
+      No KB access.
+    order: 2
+    agent_type: REVIEWER
+    model_policy: careful-coding
+    arc_role: verifier
+  - name: judge-extract
+    description: |
+      Deterministic JUDGE step — dispatched to
+      ``judges:judge_meeting_invite``.  Validates ISO-8601 datetimes,
+      bans control characters in location, caps length.  No AI agent.
+    order: 3
+    agent_type: JUDGE

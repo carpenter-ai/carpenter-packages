@@ -1,0 +1,24 @@
+# Composition descriptor for the carpenter-imap-email leaf package.
+#
+# tools/compose.py materialises this package from the ordered list of
+# shared layers below, then overlays the leaf's own (IMAP/SMTP-specific)
+# files on top.  See layers/README.md for the model.
+#
+# The package physically ships its own copies of every layer-contributed
+# file (the shared email trust pipeline: data_models.py, judges.py,
+# handlers/triage_inbound.py, templates/email-*, kb/* trust articles).
+# `python -m tools.compose verify packages/carpenter-imap-email` proves
+# those copies are byte-identical to the layer — i.e. the extraction
+# into carpenter-email-core is faithful and this backend introduced no
+# drift in the shared trust surface.
+compose_from:
+  - carpenter-email-core   # ordered list of layer names under layers/
+
+# Explicit allowlist of relative paths where the leaf may override a
+# file already placed by a layer.  Empty: the IMAP package's copies of
+# the shared files are exact duplicates of the layer, so no override is
+# needed (or wanted — an undeclared collision must stay loud).  Backend-
+# specific files (manifest.yaml, scripts.py, tools.py, handlers/imap_smtp.py,
+# the email/overview|policy-setup|search KB articles, README/SETUP) are
+# leaf-only and do not collide with any layer file.
+overrides: []
