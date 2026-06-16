@@ -404,9 +404,11 @@ def test_capability_stack_dispatch_binds_grant_and_scopes_to_package():
     # Resolve the package's credential PLATFORM-SIDE via the real
     # ctx.secret path by seeding the process env (mirrors the daemon
     # mirroring .env into os.environ).
+    # The credential_ref / env_key_prefix is EMAIL (see manifest), so
+    # ctx.secret("IMAP_USERNAME") resolves the env key EMAIL_IMAP_USERNAME.
     import os
-    os.environ["IMAP_EMAIL_IMAP_USERNAME"] = "me@example.com"
-    os.environ["IMAP_EMAIL_IMAP_PASSWORD"] = "app-pw"
+    os.environ["EMAIL_IMAP_USERNAME"] = "me@example.com"
+    os.environ["EMAIL_IMAP_PASSWORD"] = "app-pw"
     try:
         manifest = load_manifest(PKG_DIR / "manifest.yaml")
         pkg = manifest.name
@@ -473,5 +475,5 @@ def test_capability_stack_dispatch_binds_grant_and_scopes_to_package():
         # Credential resolved platform-side via ctx.secret.
         assert inst.logged_in_as == ("me@example.com", "app-pw")
     finally:
-        os.environ.pop("IMAP_EMAIL_IMAP_USERNAME", None)
-        os.environ.pop("IMAP_EMAIL_IMAP_PASSWORD", None)
+        os.environ.pop("EMAIL_IMAP_USERNAME", None)
+        os.environ.pop("EMAIL_IMAP_PASSWORD", None)

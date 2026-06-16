@@ -15,11 +15,14 @@ IMAP/SMTP-specific shape:
 * the single kind:env credential requirement with the eight
   EMAIL_* keys,
 * the confirmed mailbox.org allowlist proposals,
-* the KB articles covering the trust-contract surfaces.
+* the KB articles covering the trust-contract surfaces,
+* (v0.2.0) the inbound-poll trigger (imap_poll) + the email.received
+  triage subscription + the email_triage arc template + the
+  judge_email_triage handler that the inbound path needs.
 
-It deliberately asserts that the package does NOT declare the deferred
-inbound-poll trigger / triage subscription or the semantic-index
-triggers (those are v0.2.0 follow-ups, composed in but not wired up).
+It deliberately asserts that the package STILL does NOT declare the
+deferred semantic-index triggers / templates (those remain composed in
+but not wired up).
 """
 
 from __future__ import annotations
@@ -81,6 +84,10 @@ class ManifestShape(PackageStory):
         "email_write_draft": (
             "EmailDraftResult", "judges:judge_email_draft",
         ),
+        # v0.2.0 inbound triage template.
+        "email_triage": (
+            "EmailTriageExtract", "judges:judge_email_triage",
+        ),
     }
 
     _EXPECTED_JUDGES = frozenset({
@@ -91,6 +98,8 @@ class ManifestShape(PackageStory):
         "judge_email_archive",
         "judge_email_mark_read",
         "judge_email_draft",
+        # v0.2.0 inbound triage JUDGE.
+        "judge_email_triage",
     })
 
     # verb -> (handler, protocol, host_from, port, credential_ref)
@@ -119,7 +128,16 @@ class ManifestShape(PackageStory):
         "email/trust-warning",
         "email/style",
         "email/attachments",
+        # v0.2.0: inbound-triage trust contract, seeded now that the
+        # email.received subscription is wired.
+        "email/inbound-triage",
     })
+
+    # v0.2.0 trigger + subscription expectations.
+    # trigger_name -> (trigger_type, cadence_seconds)
+    _EXPECTED_TRIGGERS = {
+        "imap-inbound-poll": ("imap_poll", 900),
+    }
 
     def run(self, client=None, db=None) -> StoryResult:
         ensure_carpenter_on_path()
@@ -163,14 +181,16 @@ class ManifestShape(PackageStory):
             self.assert_equal(
                 tmpl.judge_handler, judge_handler, f"{tname}.judge_handler",
             )
-        # Deferred templates must NOT be declared.
+        # The semantic-index templates remain DEFERRED (not declared).
+        # email_triage IS now declared (v0.2.0 inbound path), so it is
+        # asserted present via _EXPECTED_TEMPLATES above.
         for deferred in (
-            "email_triage", "email_index_phase1", "email_index_phase2",
+            "email_index_phase1", "email_index_phase2",
             "email_index_incremental",
         ):
             self.assert_that(
                 deferred not in templates_by_name,
-                f"deferred template {deferred!r} must NOT be declared in the MVP",
+                f"deferred index template {deferred!r} must NOT be declared",
             )
 
         # ── JUDGE handlers ─────────────────────────────────────────
@@ -221,14 +241,58 @@ class ManifestShape(PackageStory):
             declared_allow, self._EXPECTED_ALLOWLIST, "allowlist_proposals",
         )
 
-        # ── No deferred triggers / subscriptions ───────────────────
+        # ── v0.2.0 inbound-poll trigger ────────────────────────────
+        triggers_by_name = {t.name: t for t in manifest.triggers}
+        for tname, (ttype, cadence) in self._EXPECTED_TRIGGERS.items():
+            self.assert_that(
+                tname in triggers_by_name,
+                f"manifest.triggers missing {tname!r}; declared: "
+                f"{sorted(triggers_by_name)}",
+            )
+            tr = triggers_by_name[tname]
+            self.assert_equal(tr.type, ttype, f"trigger {tname!r}.type")
+            self.assert_equal(
+                (tr.config or {}).get("cadence_seconds"), cadence,
+                f"trigger {tname!r}.cadence_seconds",
+            )
+            self.assert_equal(
+                (tr.config or {}).get("event_type"), "email.received",
+                f"trigger {tname!r}.event_type",
+            )
+            # Folder policy: INBOX watched by default, Junk NOT watched.
+            folders = (tr.config or {}).get("folders") or []
+            self.assert_that(
+                "INBOX" in folders,
+                f"trigger {tname!r}: INBOX must be in watched folders; "
+                f"got {folders!r}",
+            )
+            self.assert_that(
+                "Junk" not in folders,
+                f"trigger {tname!r}: Junk (spam) must NOT be watched by "
+                f"default; got {folders!r}",
+            )
+
+        # The semantic-index triggers remain DEFERRED.
+        for deferred_trigger in (
+            "imap-index-phase1", "imap-index-phase2", "imap-index-incremental",
+        ):
+            self.assert_that(
+                deferred_trigger not in triggers_by_name,
+                f"deferred index trigger {deferred_trigger!r} must NOT be "
+                f"declared",
+            )
+
+        # ── email.received triage subscription ─────────────────────
+        triage_subs = [
+            s for s in manifest.trigger_subscriptions
+            if s.event == "email.received"
+            and s.handler == "handlers.triage_inbound:handle_email_received"
+        ]
         self.assert_equal(
-            len(manifest.triggers), 0,
-            "MVP must declare zero triggers (inbound poll + index are deferred)",
-        )
-        self.assert_equal(
-            len(manifest.trigger_subscriptions), 0,
-            "MVP must declare zero trigger_subscriptions (triage is deferred)",
+            len(triage_subs), 1,
+            "manifest must declare exactly one email.received subscription "
+            "routed to handlers.triage_inbound:handle_email_received; got: "
+            f"{[(s.event, s.handler) for s in manifest.trigger_subscriptions]}",
         )
 
         # ── KB articles ────────────────────────────────────────────
@@ -244,7 +308,9 @@ class ManifestShape(PackageStory):
             f"{len(declared_models)} data models, "
             f"{len(templates_by_name)} arc templates, "
             f"{len(caps_by_verb)} platform capabilities, "
-            f"the EMAIL env credential, and "
-            f"{len(declared_slugs)} KB articles, with no deferred "
-            f"triggers/subscriptions."
+            f"the EMAIL env credential, "
+            f"{len(declared_slugs)} KB articles, "
+            f"{len(triggers_by_name)} inbound-poll trigger(s), and the "
+            f"email.received triage subscription; semantic-index triggers "
+            f"remain deferred."
         )

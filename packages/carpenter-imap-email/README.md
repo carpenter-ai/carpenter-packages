@@ -27,8 +27,11 @@ compose.yaml                  # composes from layers/carpenter-email-core
 manifest.yaml                 # package descriptor (capabilities, creds, ...)
 handlers/
   imap_smtp.py                # TRUSTED capability handlers (the new code)
-  triage_inbound.py           # composed (DEFERRED — not wired up)
+  triage_inbound.py           # composed: email.received subscription shim (v0.2.0)
   __init__.py
+triggers/
+  imap_poll.py                # leaf: inbound UID-poll trigger (v0.2.0)
+  _index_common.py            # composed (DEFERRED semantic-index base)
 scripts.py                    # cred-free / host-free EXECUTOR scripts
 tools.py                      # @chat_tool functions (pkg_imap_*)
 arc_builders.py               # composed: backend-agnostic arc builders
@@ -40,7 +43,8 @@ kb/
   policy-setup.md             # leaf (IMAP-specific)
   search.md                   # leaf (IMAP-specific)
   trust-warning.md style.md attachments.md   # composed (shared trust KB)
-  inbound-triage.md index.md  # composed (DEFERRED features' KB)
+  inbound-triage.md           # composed: seeded in v0.2.0 (triage wired)
+  index.md                    # composed (DEFERRED semantic-index KB)
 user_stories/                 # 5 package-internal acceptance stories
 ```
 
@@ -89,14 +93,42 @@ Write: `pkg_imap_send_email`, `pkg_imap_reply_email`,
 confirm-gated, graduated through REVIEWER + JUDGE).
 Trust: `pkg_imap_trust_sender` / `pkg_imap_untrust_sender`.
 
-## DEFERRED (NOT built in v0.1.0)
+## v0.2.0 — inbound path (NEW)
 
 - **Inbound UID-poll trigger + `email.received` triage subscription.**
-  The shared `email-triage` template, `handlers/triage_inbound.py`, and
-  `kb/inbound-triage.md` are composed in but the manifest does not
-  declare the trigger or subscription.  `tools.py` keeps a dormant
-  `_create_triage_arc_tree` wrapper so the path lights up cleanly when
-  this ships in v0.2.0.
+  `triggers/imap_poll.py` ships `ImapPollTrigger` (an in-process
+  `PollableTrigger`).  Every 15 min (config-overridable, 60s floor) it
+  polls the watched IMAP folder(s) and emits one `email.received` event
+  per newly-arrived message UID.  The manifest declares the
+  `imap-inbound-poll` trigger + the `email.received` →
+  `handlers.triage_inbound:handle_email_received` subscription + the
+  `email_triage` arc template; each event fans out into one
+  PLANNER → EXECUTOR → REVIEWER → JUDGE triage tree that graduates a
+  single `EmailTriageExtract` to chat. No raw body/header content leaves
+  the JUDGE gate.
+
+  - **UID/UIDVALIDITY watermark.** IMAP has no Gmail-style monotonic
+    history cursor, and RFC 3501 UIDs are only monotonic *within a
+    `(mailbox, UIDVALIDITY)` generation*.  So the trigger persists
+    `{uid, uidvalidity}` per folder in `package_state` (CAS-advanced).
+    First run records the current max UID and emits nothing.  On a
+    UIDVALIDITY change (server renumbered the mailbox) it re-baselines to
+    the current max UID and emits nothing — it never re-fans the mailbox
+    under stale UIDs.  Emits are capped at 25/poll (back-pressure).
+  - **Credentials platform-side.** The trigger runs in TRUSTED platform
+    context (not an executor), so it resolves host + creds via
+    `carpenter.packages.capabilities.resolve_package_secret(source_package,
+    "EMAIL_IMAP_*")` — the SAME resolver the capability loader uses for
+    grant hosts and that `ctx.secret` uses for handler credentials
+    (process env → per-package `.env` → platform config).  Nothing comes
+    from an untrusted executor.
+  - **Folder policy (the Junk decision).** Watches **INBOX** only by
+    default.  The watched set is configurable via the trigger's
+    `folders` config; the operator MAY add `"Junk"` to triage spam, but
+    Junk is **NOT** watched by default.
+
+## STILL DEFERRED (NOT built)
+
 - **Semantic resource index (vector search).** The `email-index-*`
   templates and `kb/index.md` are composed in but not declared; no
   vector store, no index triggers.
@@ -134,11 +166,11 @@ load-bearing:
    out the door, so an append failure is reported rather than failing
    the arc.
 2. **Spam lands in `Junk`, not INBOX.** mailbox.org server-side spam
-   filtering files junk into the `Junk` folder.  This matters for the
-   **deferred** inbound poller (v0.2.0): when it is built it must decide
-   whether to poll INBOX-only or INBOX+Junk.  The MVP does not build the
-   poller; this is documented here as a design constraint for the
-   follow-up.  Folder layout: `INBOX, Sent, Drafts, Trash, Junk`.
+   filtering files junk into the `Junk` folder.  The v0.2.0 inbound
+   poller resolves this by watching **INBOX only** by default (Junk is
+   configurable via the trigger's `folders` list but never watched
+   implicitly) — so spam does not auto-trigger triage.  Folder layout:
+   `INBOX, Sent, Drafts, Trash, Junk`.
 
 ## Testing
 
