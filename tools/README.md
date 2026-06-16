@@ -89,3 +89,75 @@ additive merge, undeclared-collision failure, override-allowed
 collisions, layer ordering, verify pass/fail, config validation, and a
 real-repo faithfulness check asserting `carpenter-email-core`
 reproduces carpenter-gmail's 31 shared files byte-for-byte.
+
+## `publish_release.py` — package-archive GitHub Releases publisher
+
+Publishes each package version as a **GitHub Release asset** that the
+Carpenter package-upgrade reconcile system fetches as the remote
+pristine ("shipped") tree. The reconcile fetcher
+(carpenter-linux's `ArchiveFetcher`) downloads the asset and
+carpenter-core's `archive_cache.load_pristine_tree` **verifies it
+against the recorded install root hash** (`installed_packages.hash` /
+`installer.compute_package_hash`) before trusting a byte of it.
+
+### Convention (publisher and fetcher MUST agree)
+
+* Release **tag**:   `<name>-v<version>` (e.g. `carpenter-gmail-v0.7.0`)
+* Release **asset**: `<name>-<version>.tar.gz`
+* **Per-package** releases — versions are independent. Idempotent;
+  **never** deletes old releases (historical assets must stay fetchable
+  to reconstruct `shipped_old` for any installed version).
+
+### Determinism contract (matches carpenter-core exactly)
+
+The asset must expand to a tree that hashes identically to what the
+installer measured. `publish_release.py` reproduces carpenter-core's
+`archive_cache.archive_tree` **byte-for-byte**: it archives the
+**on-disk `packages/<name>/` directory** (which is what
+`install_package` copies as-is and `compute_package_hash` walks — core
+has no `compose.yaml` awareness), applying the same ignore rules
+(`installer._iter_files`), sorted POSIX member order, normalized
+member metadata (`mtime/uid/gid=0`, `mode=0644`, `REGTYPE`), and
+gzip `mtime=0`. For packages that declare layers it first runs
+`compose verify` as a publish-time drift guard, refusing to ship a leaf
+that has diverged from its layer. If carpenter-core's `archive_tree` /
+`compute_package_hash` ever change, the mirrored copies here must change
+in lockstep — the tests guard this.
+
+### Usage
+
+```bash
+# Build the archive + print tag/asset/hash WITHOUT publishing:
+python -m tools.publish_release carpenter-gmail --dry-run
+
+# Build + publish (needs GITHUB_TOKEN with contents:write on the repo):
+python -m tools.publish_release carpenter-gmail
+```
+
+### CI
+
+The CI workflow runs the publisher on merge to `main` for any package
+whose `manifest.yaml` version changed, plus a manual `workflow_dispatch`
+taking a package name. It uses the built-in `GITHUB_TOKEN` with
+`contents: write` (carpenter-packages is a **public** repo, so the
+consumer fetcher downloads anonymously; only the publish job needs a
+write token).
+
+> **Activation note:** the workflow ships at
+> `tools/ci/publish-package-archives.yml` and must be moved to
+> `.github/workflows/publish-package-archives.yml` to take effect. It is
+> parked outside `.github/workflows/` because the bot token that opened
+> the PR lacks the GitHub `workflow` OAuth scope (GitHub refuses to push
+> commits adding workflow files without it). A maintainer with that scope
+> should relocate the file; its content is final.
+
+### Tests
+
+```bash
+~/bin/run-tests tools/tests/test_publish_release.py -q
+```
+
+Mirrors carpenter-core's `test_archive_cache` determinism + round-trip
+assertions (identical tree -> byte-identical archive; expanded archive
+rehashes to the source root hash) plus naming, ignore-rule, and
+real-repo build/round-trip checks.

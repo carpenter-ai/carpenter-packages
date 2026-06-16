@@ -1,0 +1,129 @@
+# Publish package-archive GitHub Releases for the reconcile fetcher.
+#
+# !! ACTIVATION: move this file to .github/workflows/publish-package-archives.yml
+#    to enable it. It is parked under tools/ci/ because the bot token used to
+#    open this PR lacks the GitHub `workflow` OAuth scope, so it cannot push a
+#    commit that adds a file under .github/workflows/. A maintainer (or a token
+#    WITH `workflow` scope) must relocate it. The content is final and
+#    reviewable as-is; only its path needs changing on activation.
+#
+# WHAT THIS DOES
+#   For each capability package under packages/<name>/ whose manifest.yaml
+#   `version` changed in the merge to main, build the deterministic installable
+#   archive (<name>-<version>.tar.gz) and publish/update the GitHub Release
+#   tagged <name>-v<version>, attaching that archive as an asset. This is the
+#   artifact carpenter's package-upgrade reconcile system fetches as the remote
+#   "shipped_old"/"shipped_new" pristine tree; it is verified against the
+#   recorded install root hash (carpenter-core compute_package_hash), so the
+#   archive MUST be byte-reproducible (tools/publish_release.py guarantees this).
+#
+#   A manual workflow_dispatch is also provided to (re)publish a single named
+#   package on demand.
+#
+# AUTH / SECRETS
+#   Uses the built-in GITHUB_TOKEN with `permissions: contents: write` (declared
+#   below). No extra secret is required because the publisher targets THIS repo
+#   (carpenter-ai/carpenter-packages) and creating releases is a `contents`
+#   permission. tools/publish_release.py reads the token from $GITHUB_TOKEN.
+#
+#   NOTE: carpenter-ai/carpenter-packages is a PUBLIC repo, so the consumer-side
+#   fetcher (carpenter-linux's ArchiveFetcher) can download release assets
+#   anonymously; only this publish job needs a write token. If the repo is ever
+#   made private, the consumer fetcher will need a read token from the platform
+#   secret store (NOT from any package) — see
+#   ~/notes/carpenter-package-archive-publishing-plan.md section B.
+#
+#   The publisher NEVER deletes releases; historical version assets are retained
+#   indefinitely so any installed version's pristine tree stays fetchable.
+
+name: Publish package archives
+
+on:
+  push:
+    branches: [main]
+    # Only react to changes under packages/ or to the tooling itself.
+    paths:
+      - "packages/**"
+      - "layers/**"
+      - "tools/publish_release.py"
+      - "tools/compose.py"
+      - ".github/workflows/publish-package-archives.yml"
+      # (parked source path; harmless once the file is moved into place)
+      - "tools/ci/publish-package-archives.yml"
+  workflow_dispatch:
+    inputs:
+      package:
+        description: "Package name to (re)publish (under packages/)"
+        required: true
+        type: string
+
+# Least-privilege: creating releases/uploading assets needs `contents: write`.
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (with history for version-change detection)
+        uses: actions/checkout@v4
+        with:
+          # Need the previous commit to diff manifest versions on push.
+          fetch-depth: 2
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install pyyaml
+
+      - name: Determine packages to publish
+        id: select
+        shell: bash
+        env:
+          DISPATCH_PACKAGE: ${{ github.event.inputs.package }}
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            # Manual run: publish exactly the requested package.
+            echo "packages=${DISPATCH_PACKAGE}" >> "$GITHUB_OUTPUT"
+            echo "Selected (manual): ${DISPATCH_PACKAGE}"
+            exit 0
+          fi
+          # Push to main: publish every package whose manifest.yaml version
+          # changed in this push (compare HEAD~1..HEAD).
+          changed=""
+          for mf in packages/*/manifest.yaml; do
+            pkg="$(basename "$(dirname "$mf")")"
+            # Old version (empty if the manifest is new in this push).
+            old_ver="$(git show "HEAD~1:$mf" 2>/dev/null \
+              | sed -n 's/^version:[[:space:]]*//p' | tr -d '"'"'"' | head -n1 || true)"
+            new_ver="$(sed -n 's/^version:[[:space:]]*//p' "$mf" \
+              | tr -d '"'"'"' | head -n1)"
+            if [ "$old_ver" != "$new_ver" ]; then
+              echo "version change for $pkg: '${old_ver:-<none>}' -> '$new_ver'"
+              changed="${changed:+$changed }$pkg"
+            fi
+          done
+          echo "packages=${changed}" >> "$GITHUB_OUTPUT"
+          echo "Selected (version-changed): ${changed:-<none>}"
+
+      - name: Publish selected package archives
+        if: steps.select.outputs.packages != ''
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          for pkg in ${{ steps.select.outputs.packages }}; do
+            echo "::group::publish $pkg"
+            python -m tools.publish_release "$pkg" --repo "$GITHUB_REPOSITORY"
+            echo "::endgroup::"
+          done
+
+      - name: Nothing to publish
+        if: steps.select.outputs.packages == ''
+        run: echo "No package versions changed; nothing to publish."
