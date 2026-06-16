@@ -153,17 +153,17 @@ judge_handlers:
 # in but NOT seeded (their features are deferred).
 kb_articles:
   - slug: email/overview
-    path: kb/overview.md
+    path: kb/email/overview.md
   - slug: email/policy-setup
-    path: kb/policy-setup.md
+    path: kb/email/policy-setup.md
   - slug: email/search
-    path: kb/search.md
+    path: kb/email/search.md
   - slug: email/trust-warning
-    path: kb/trust-warning.md
+    path: kb/email/trust-warning.md
   - slug: email/style
-    path: kb/style.md
+    path: kb/email/style.md
   - slug: email/attachments
-    path: kb/attachments.md
+    path: kb/email/attachments.md
 
 # TRUSTED platform-side dispatch verbs.  Installing this package grants
 # PLATFORM-LEVEL TRUST: these handlers run parent-side with egress +
