@@ -498,6 +498,9 @@ def _send_via_smtp(*, to_list, subject, body, in_reply_to, conversation_id):
     state_seed = {
         "raw_message_b64": raw_b64,
         "to_addresses_json": json.dumps(list(to_list)),
+        # mailbox.org does not auto-file SMTP-sent mail into Sent, so the
+        # send script appends a copy here after a successful smtp.send.
+        "sent_mailbox": "Sent",
     }
     if in_reply_to:
         state_seed["in_reply_to"] = in_reply_to

@@ -10,11 +10,11 @@ IMAP/SMTP-specific shape:
 * the three read + four write arc templates with their
   extract_kind / judge_handler wiring,
 * the read + write JUDGE handlers,
-* the four TRUSTED platform_capabilities (imap.fetch / imap.search /
-  imap.store / smtp.send) with their egress grants,
+* the five TRUSTED platform_capabilities (imap.fetch / imap.search /
+  imap.store / imap.append / smtp.send) with their egress grants,
 * the single kind:env credential requirement with the eight
   IMAP_EMAIL_* keys,
-* the provisional mailbox.org allowlist proposals,
+* the confirmed mailbox.org allowlist proposals,
 * the KB articles covering the trust-contract surfaces.
 
 It deliberately asserts that the package does NOT declare the deferred
@@ -98,6 +98,7 @@ class ManifestShape(PackageStory):
         "imap.fetch": ("handle_imap_fetch", "imaps", "IMAP_HOST", 993, "IMAP_EMAIL"),
         "imap.search": ("handle_imap_search", "imaps", "IMAP_HOST", 993, "IMAP_EMAIL"),
         "imap.store": ("handle_imap_store", "imaps", "IMAP_HOST", 993, "IMAP_EMAIL"),
+        "imap.append": ("handle_imap_append", "imaps", "IMAP_HOST", 993, "IMAP_EMAIL"),
         "smtp.send": ("handle_smtp_send", "smtps", "SMTP_HOST", 465, "IMAP_EMAIL"),
     }
 

@@ -133,6 +133,7 @@ dispatch(Label("resource.finalize"), {"resource_id": raw_resource_id})
 #   * raw_message_b64        : str  (RFC-822 message text; see note)
 #   * to_addresses_json      : str  (JSON array of recipients)
 #   * expected_account_email : str  (mailbox we expect to send from)
+#   * sent_mailbox           : str  (folder to file the Sent copy into)
 #   * raw_resource_path      : str
 #   * raw_resource_id        : int
 #
@@ -142,6 +143,15 @@ dispatch(Label("resource.finalize"), {"resource_id": raw_resource_id})
 # credentials and uses the authenticated account as the envelope
 # sender, so a swapped credential cannot redirect the From.  The script
 # passes the message text + recipient list; the handler owns identity.
+#
+# Sent-folder copy (mailbox.org behaviour): a raw SMTP send leaves NO
+# copy in Sent (unlike Gmail's API, which auto-files sent mail).  So,
+# after a successful smtp.send, this script dispatches imap.append to
+# file the same message into the Sent folder.  imap.append egresses to
+# the IMAP host under its OWN grant (imaps / IMAP_HOST / 993), so the
+# Sent copy never widens the smtp.send grant.  The append is best-effort:
+# a send is already irrevocably out the door, so an append failure is
+# recorded in the receipt rather than failing the whole arc.
 SMTP_SEND_SCRIPT = '''\
 from carpenter_tools.declarations import Label
 import json as _json
@@ -151,6 +161,7 @@ def _state(key):
 
 raw_message       = _state("raw_message_b64")
 to_json           = _state("to_addresses_json")
+sent_mailbox      = _state("sent_mailbox")
 raw_resource_path = _state("raw_resource_path")
 raw_resource_id   = _state("raw_resource_id")
 
@@ -165,11 +176,21 @@ result = dispatch(Label("smtp.send"), {
 if not result.get("ok"):
     raise RuntimeError("smtp.send failed: " + str(result.get("error") or result.get("refused")))
 
+# File a server-side copy into the Sent folder (mailbox.org does not do
+# this for raw SMTP sends).  Best-effort: the mail is already sent.
+append_result = dispatch(Label("imap.append"), {
+    "raw_message": raw_message,
+    "mailbox": sent_mailbox,
+    "flags": ["\\\\Seen"],
+})
+
 receipt = {
     "operation": "send",
     "accepted_recipients": result.get("accepted_recipients", []),
     "refused": result.get("refused", {}),
     "status_code": 250 if result.get("ok") else 554,
+    "sent_copy_filed": bool(append_result.get("ok")),
+    "sent_mailbox": sent_mailbox,
 }
 dispatch(Label("files.write"), {
     "path": raw_resource_path,

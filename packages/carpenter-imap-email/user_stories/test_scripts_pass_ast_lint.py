@@ -7,8 +7,9 @@ The package's trust contract is that the only verbs an EXECUTOR may
 dispatch are drawn from a small, audit-readable allowlist.  Crucially,
 for this backend that allowlist includes the package's own TRUSTED
 capability verbs (``imap.fetch`` / ``imap.search`` / ``imap.store`` /
-``smtp.send``) — and EXCLUDES ``web.get`` / ``web.post``, because reaching
-the network is the trusted parent-side handler's job, not the executor's.
+``imap.append`` / ``smtp.send``) — and EXCLUDES ``web.get`` / ``web.post``,
+because reaching the network is the trusted parent-side handler's job,
+not the executor's.
 
 This story ALSO enforces the security-critical invariant that the
 executor scripts are cred-free and host-free: they must NOT read
@@ -33,6 +34,7 @@ _ALLOWED_DISPATCH_VERBS = frozenset({
     "imap.fetch",
     "imap.search",
     "imap.store",
+    "imap.append",
     "smtp.send",
     "files.write",
     "resource.finalize",
@@ -42,7 +44,7 @@ _ALLOWED_DISPATCH_VERBS = frozenset({
 # use one of these (otherwise the AST walk is broken or a script reached
 # the network some other way).
 _CAPABILITY_VERBS = frozenset({
-    "imap.fetch", "imap.search", "imap.store", "smtp.send",
+    "imap.fetch", "imap.search", "imap.store", "imap.append", "smtp.send",
 })
 
 # Substrings that would indicate a cred/host leak into the untrusted
