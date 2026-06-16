@@ -242,8 +242,11 @@ def test_gmail_layer_extraction_is_faithful() -> None:
         pytest.skip("carpenter-gmail compose.yaml not present")
     result = verify(gmail, repo_root=_REPO_ROOT)
     assert result.ok, result.summary()
-    # The layer contributes the full move-list (31 files).
-    assert result.checked == 31, result.summary()
+    # The layer contributes the full move-list: the 31 files extracted
+    # byte-identically at the initial extraction (PR #2) plus
+    # ``arc_builders.py``, added when the shared arc-tree builders were
+    # parameterised and moved into the layer (the cutover PR).
+    assert result.checked == 32, result.summary()
 
 
 def test_repo_root_autodetection_finds_layers_dir() -> None:
