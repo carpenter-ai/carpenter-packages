@@ -52,7 +52,7 @@ _CAPABILITY_VERBS = frozenset({
 _BANNED_SUBSTRINGS = (
     "os.environ",
     "getenv",
-    "IMAP_EMAIL_",     # never reference the credential env keys in-script
+    "EMAIL_",     # never reference the credential env keys in-script
     "imap.mailbox.org",
     "smtp.mailbox.org",
     "PASSWORD",

@@ -172,8 +172,8 @@ kb_articles:
 # install time.
 #
 # Host + port + protocol are bound from the package's own kind:env
-# credential (host_from references the IMAP_EMAIL_IMAP_HOST /
-# IMAP_EMAIL_SMTP_HOST env values the operator supplies).  Credentials
+# credential (host_from references the EMAIL_IMAP_HOST /
+# EMAIL_SMTP_HOST env values the operator supplies).  Credentials
 # resolve PLATFORM-SIDE via ctx.secret() — never from handler params,
 # never from the untrusted executor's environment.
 #
@@ -190,7 +190,7 @@ platform_capabilities:
       protocol: imaps
       host_from: IMAP_HOST
       port: 993
-      credential_ref: IMAP_EMAIL
+      credential_ref: EMAIL
   - verb: imap.search
     kind: egress
     module: handlers.imap_smtp
@@ -199,7 +199,7 @@ platform_capabilities:
       protocol: imaps
       host_from: IMAP_HOST
       port: 993
-      credential_ref: IMAP_EMAIL
+      credential_ref: EMAIL
   - verb: imap.store
     kind: egress
     module: handlers.imap_smtp
@@ -208,7 +208,7 @@ platform_capabilities:
       protocol: imaps
       host_from: IMAP_HOST
       port: 993
-      credential_ref: IMAP_EMAIL
+      credential_ref: EMAIL
   # imap.append files a raw message into a named folder (default Sent).
   # mailbox.org does NOT auto-populate Sent on a raw SMTP send, so the
   # send flow APPENDs the outgoing message here AFTER smtp.send.  Shares
@@ -222,7 +222,7 @@ platform_capabilities:
       protocol: imaps
       host_from: IMAP_HOST
       port: 993
-      credential_ref: IMAP_EMAIL
+      credential_ref: EMAIL
   - verb: smtp.send
     kind: egress
     module: handlers.imap_smtp
@@ -231,7 +231,7 @@ platform_capabilities:
       protocol: smtps
       host_from: SMTP_HOST
       port: 465
-      credential_ref: IMAP_EMAIL
+      credential_ref: EMAIL
 
 # Allowlist proposals.  The production provider + account are now
 # CONFIRMED: mailbox.org, account carpenter-ai@mailbox.org, IMAPS on
@@ -247,14 +247,14 @@ allowlist_proposals:
     value: smtp.mailbox.org
 
 # Environment-variable credential requirement.  At install the operator
-# is prompted for each IMAP_EMAIL_<SUFFIX> value.  These are resolved
+# is prompted for each EMAIL_<SUFFIX> value.  These are resolved
 # PLATFORM-SIDE by the capability handlers via ctx.secret(...), NOT
 # injected into the untrusted executor.  IMAP_HOST / SMTP_HOST also
 # supply the egress host for the grants above (grant.host_from).
 credential_requirements:
   - kind: env
     provider: imap_smtp
-    env_key_prefix: IMAP_EMAIL
+    env_key_prefix: EMAIL
     required_keys:
       - IMAP_HOST
       - IMAP_PORT

@@ -54,7 +54,7 @@ logger = logging.getLogger(__name__)
 # grants' credential_ref).  Resolved PLATFORM-SIDE by the handlers via
 # ctx.secret(...) — the chat tools only read the username for the
 # expected-account fail-closed check.
-_ENV_KEY_PREFIX = "IMAP_EMAIL"
+_ENV_KEY_PREFIX = "EMAIL"
 
 # Audit ``source_descriptor`` prefix for untrusted raw-fetch Resources
 # created by this backend.  Passed into the shared arc builders so the
@@ -75,7 +75,7 @@ def _resolve_expected_account() -> str:
     """Return the mailbox address Carpenter expects to be acting on.
 
     For the IMAP backend the configured account is the IMAP username the
-    operator supplied at install (``IMAP_EMAIL_IMAP_USERNAME``), falling
+    operator supplied at install (``EMAIL_IMAP_USERNAME``), falling
     back to the platform operator email.  Returns empty string if
     neither is set; callers MUST treat empty as a fail-closed condition
     (the T1 envelope check is unenforceable without an expected account).
@@ -95,8 +95,8 @@ def _resolve_expected_account() -> str:
 
 
 _EXPECTED_ACCOUNT_NOT_CONFIGURED_ERROR = (
-    "expected_account is not configured (neither IMAP_EMAIL_IMAP_USERNAME "
-    "nor operator_email is set).  Supply the IMAP_EMAIL_* credentials at "
+    "expected_account is not configured (neither EMAIL_IMAP_USERNAME "
+    "nor operator_email is set).  Supply the EMAIL_* credentials at "
     "install — without an expected account the T1 envelope "
     "recipient-mismatch check cannot be enforced and read paths fail "
     "closed."

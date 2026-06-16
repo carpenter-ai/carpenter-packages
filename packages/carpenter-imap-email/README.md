@@ -66,9 +66,9 @@ egress verbs.  Each handler in `handlers/imap_smtp.py` is invoked as
 `handler(params, ctx)` where:
 
 - `ctx.host` / `ctx.port` / `ctx.protocol` come from the
-  operator-confirmed grant (bound from `IMAP_EMAIL_IMAP_HOST` /
-  `IMAP_EMAIL_SMTP_HOST` at install).
-- `ctx.secret("IMAP_PASSWORD")` etc. resolve `IMAP_EMAIL_<SUFFIX>`
+  operator-confirmed grant (bound from `EMAIL_IMAP_HOST` /
+  `EMAIL_SMTP_HOST` at install).
+- `ctx.secret("IMAP_PASSWORD")` etc. resolve `EMAIL_<SUFFIX>`
   **platform-side** — never from the untrusted executor environment.
 - `params` carries only the operation payload the executor controls
   (uid / mailbox / query / flags / outgoing message), every field
@@ -112,7 +112,7 @@ The production provider + account are **CONFIRMED**: mailbox.org, account
 `carpenter-ai@mailbox.org`, IMAPS on `imap.mailbox.org:993` and SMTPS on
 `smtp.mailbox.org:465`.  The handlers stay provider-agnostic (any
 IMAPS/SMTPS endpoint works); the operator supplies the host + the eight
-`IMAP_EMAIL_*` credentials at install via the per-package `.env`.  See
+`EMAIL_*` credentials at install via the per-package `.env`.  See
 `SETUP.md`.
 
 Guard at-rest encryption is **OFF** on this mailbox — messages are

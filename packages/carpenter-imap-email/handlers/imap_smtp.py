@@ -16,10 +16,10 @@ of these verbs.
 Trust contract — host + credentials come from ``ctx``, NEVER from params:
 
 * ``ctx.host`` / ``ctx.port`` / ``ctx.protocol`` are the operator-confirmed
-  egress grant (bound at install from ``IMAP_EMAIL_IMAP_HOST`` /
-  ``IMAP_EMAIL_SMTP_HOST``).  The handler may not point egress anywhere
+  egress grant (bound at install from ``EMAIL_IMAP_HOST`` /
+  ``EMAIL_SMTP_HOST``).  The handler may not point egress anywhere
   else.
-* ``ctx.secret("IMAP_USERNAME")`` etc. resolve ``IMAP_EMAIL_<SUFFIX>``
+* ``ctx.secret("IMAP_USERNAME")`` etc. resolve ``EMAIL_<SUFFIX>``
   PLATFORM-SIDE (live process env / loaded .env), never from the
   untrusted executor.
 * ``params`` carries ONLY the operation payload the executor controls:
@@ -476,7 +476,7 @@ def handle_imap_append(params: dict, ctx) -> dict:
     into ``Sent`` — a raw SMTP send leaves no server-side copy.  So the
     send flow explicitly APPENDs the just-sent message to ``Sent`` via
     this verb.  It egresses to the IMAP host under THIS verb's own grant
-    (imaps / IMAP_HOST / 993 / IMAP_EMAIL) — the same egress class as the
+    (imaps / IMAP_HOST / 993 / EMAIL) — the same egress class as the
     other ``imap.*`` verbs, and a different one than ``smtp.send`` — so
     the Sent-copy never widens the smtp.send grant.
 

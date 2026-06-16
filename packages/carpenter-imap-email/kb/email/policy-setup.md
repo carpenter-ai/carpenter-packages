@@ -3,25 +3,25 @@
 ## Credentials the operator supplies at install
 
 This package declares one `kind: env` credential requirement with the
-prefix `IMAP_EMAIL`.  At install the operator is prompted for eight
+prefix `EMAIL`.  At install the operator is prompted for eight
 values:
 
 | Env var                    | Meaning                              |
 |----------------------------|--------------------------------------|
-| `IMAP_EMAIL_IMAP_HOST`     | IMAP server hostname (IMAPS / 993)   |
-| `IMAP_EMAIL_IMAP_PORT`     | IMAP port (993)                      |
-| `IMAP_EMAIL_IMAP_USERNAME` | IMAP login (usually the address)     |
-| `IMAP_EMAIL_IMAP_PASSWORD` | IMAP app password                    |
-| `IMAP_EMAIL_SMTP_HOST`     | SMTP server hostname (SMTPS / 465)   |
-| `IMAP_EMAIL_SMTP_PORT`     | SMTP port (465)                      |
-| `IMAP_EMAIL_SMTP_USERNAME` | SMTP login (usually the address)     |
-| `IMAP_EMAIL_SMTP_PASSWORD` | SMTP app password                    |
+| `EMAIL_IMAP_HOST`     | IMAP server hostname (IMAPS / 993)   |
+| `EMAIL_IMAP_PORT`     | IMAP port (993)                      |
+| `EMAIL_IMAP_USERNAME` | IMAP login (usually the address)     |
+| `EMAIL_IMAP_PASSWORD` | IMAP app password                    |
+| `EMAIL_SMTP_HOST`     | SMTP server hostname (SMTPS / 465)   |
+| `EMAIL_SMTP_PORT`     | SMTP port (465)                      |
+| `EMAIL_SMTP_USERNAME` | SMTP login (usually the address)     |
+| `EMAIL_SMTP_PASSWORD` | SMTP app password                    |
 
 These resolve **platform-side** via `CapabilityContext.secret(...)` when
 a trusted handler runs.  They are never injected into the untrusted
 EXECUTOR.
 
-`IMAP_EMAIL_IMAP_HOST` and `IMAP_EMAIL_SMTP_HOST` also supply the egress
+`EMAIL_IMAP_HOST` and `EMAIL_SMTP_HOST` also supply the egress
 host for the capability grants (the manifest's `grant.host_from`), so
 the operator confirms a concrete `host:port` at install and the handler
 can never point egress elsewhere.
