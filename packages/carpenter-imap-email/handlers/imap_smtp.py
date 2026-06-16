@@ -47,6 +47,7 @@ from __future__ import annotations
 import imaplib
 import re
 import smtplib
+import time
 from email.message import EmailMessage
 
 # ── Bounds ──────────────────────────────────────────────────────────
@@ -466,3 +467,71 @@ def _build_outgoing(params: dict, ctx) -> tuple[list[str], bytes]:
     msg["Subject"] = subject
     msg.set_content(body)
     return to_list, msg.as_bytes()
+
+
+def handle_imap_append(params: dict, ctx) -> dict:
+    """APPEND a raw RFC-822 message into a named IMAP folder.
+
+    mailbox.org (unlike Gmail's API) does NOT auto-file SMTP-sent mail
+    into ``Sent`` — a raw SMTP send leaves no server-side copy.  So the
+    send flow explicitly APPENDs the just-sent message to ``Sent`` via
+    this verb.  It egresses to the IMAP host under THIS verb's own grant
+    (imaps / IMAP_HOST / 993 / IMAP_EMAIL) — the same egress class as the
+    other ``imap.*`` verbs, and a different one than ``smtp.send`` — so
+    the Sent-copy never widens the smtp.send grant.
+
+    Params (executor-controlled): ``raw_message`` (required, the full
+    RFC-822 message text to file), ``mailbox`` (optional, default
+    ``Sent``), ``flags`` (optional list, default ``["\\Seen"]`` so the
+    filed copy isn't shown as unread).  Host + credentials come from
+    ``ctx`` only.
+
+    Returns ``{"ok", "mailbox", "flags", "size_bytes", "host", "port"}``.
+    """
+    try:
+        mailbox = _valid_mailbox(params, default="Sent")
+        raw_message = params.get("raw_message")
+        if not isinstance(raw_message, str) or not raw_message:
+            raise _HandlerError("param 'raw_message' must be a non-empty RFC-822 string")
+        msg_bytes = raw_message.encode("utf-8")
+        if len(msg_bytes) > _MAX_RAW_MESSAGE_BYTES:
+            raise _HandlerError("message to append exceeds size bound")
+
+        # Default to \Seen so the filed copy is not counted as unread.
+        raw_flags = params.get("flags", ("\\Seen",))
+        if isinstance(raw_flags, str):
+            raw_flags = (raw_flags,)
+        if not isinstance(raw_flags, (list, tuple)):
+            raise _HandlerError("param 'flags' must be a string or list of strings")
+        flags: list[str] = []
+        for f in raw_flags:
+            if not isinstance(f, str) or not _FLAG_RE.match(f):
+                raise _HandlerError(
+                    f"flag {f!r} must match {_FLAG_RE.pattern!r}; refusing a "
+                    f"value that could break the IMAP APPEND command",
+                )
+            flags.append(f)
+        flag_str = "(" + " ".join(flags) + ")" if flags else None
+
+        conn = None
+        try:
+            conn = _imap_login(ctx)
+            typ, _ = conn.append(
+                mailbox, flag_str, imaplib.Time2Internaldate(time.time()), msg_bytes,
+            )
+            if typ != "OK":
+                raise _HandlerError(f"IMAP APPEND to {mailbox!r} failed: {typ}")
+            return {
+                "ok": True,
+                "mailbox": mailbox,
+                "flags": flags,
+                "size_bytes": len(msg_bytes),
+                "host": ctx.host,
+                "port": ctx.port,
+            }
+        finally:
+            _close_quietly(conn)
+    except _HandlerError as exc:
+        return {"ok": False, "error": str(exc), "verb": "imap.append"}
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": f"imap.append failed: {exc}", "verb": "imap.append"}

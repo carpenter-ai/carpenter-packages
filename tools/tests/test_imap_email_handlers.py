@@ -134,11 +134,16 @@ class FakeIMAP:
         self.timeout = timeout
         self.logged_in_as = None
         self.selected = None
+        self.appended = None  # (mailbox, flags, message_bytes)
         FakeIMAP.instances.append(self)
 
     def login(self, user, password):
         self.logged_in_as = (user, password)
         return ("OK", [b"logged in"])
+
+    def append(self, mailbox, flags, date_time, message):
+        self.appended = (mailbox, flags, message)
+        return ("OK", [b"APPEND completed"])
 
     def select(self, mailbox, readonly=False):
         self.selected = (mailbox, readonly)
@@ -297,6 +302,90 @@ def test_smtp_send_rejects_too_many_recipients():
     assert "recipients" in out["error"]
 
 
+# ── imap.append handler (Sent-folder copy) ──────────────────────────
+
+
+def test_imap_append_files_into_named_folder_using_ctx_only():
+    ctx = _imap_ctx()
+    raw = "From: me@example.com\r\nTo: alice@example.com\r\nSubject: hi\r\n\r\nbody"
+    # Hostile host/password in params MUST be ignored.
+    out = handlers.handle_imap_append(
+        {
+            "raw_message": raw,
+            "mailbox": "Sent",
+            "host": "evil.example",
+            "password": "stolen",
+        },
+        ctx,
+    )
+    assert out["ok"] is True
+    assert out["mailbox"] == "Sent"
+    assert out["flags"] == ["\\Seen"]
+    assert out["host"] == "imap.confirmed-host.example"
+    assert out["port"] == 993
+    inst = FakeIMAP.instances[-1]
+    # Connection host/port + creds came from ctx, not params.
+    assert inst.host == "imap.confirmed-host.example"
+    assert inst.port == 993
+    assert inst.logged_in_as == ("me@example.com", "app-pw")
+    # The message was APPENDed to the named folder with the \Seen flag.
+    mailbox, flag_str, message = inst.appended
+    assert mailbox == "Sent"
+    assert flag_str == "(\\Seen)"
+    assert message == raw.encode("utf-8")
+
+
+def test_imap_append_defaults_to_sent_folder():
+    out = handlers.handle_imap_append({"raw_message": "x"}, _imap_ctx())
+    assert out["ok"] is True
+    assert out["mailbox"] == "Sent"
+
+
+def test_imap_append_rejects_empty_message():
+    out = handlers.handle_imap_append({"raw_message": ""}, _imap_ctx())
+    assert out["ok"] is False
+    assert "raw_message" in out["error"]
+    # No connection on a validation failure.
+    assert FakeIMAP.instances == []
+
+
+def test_imap_append_rejects_bad_flag():
+    out = handlers.handle_imap_append(
+        {"raw_message": "x", "flags": ["bad flag"]}, _imap_ctx(),
+    )
+    assert out["ok"] is False
+    assert "flag" in out["error"]
+
+
+def test_send_flow_leaves_a_sent_copy():
+    """Mirror what SMTP_SEND_SCRIPT does in the executor: dispatch
+    smtp.send THEN imap.append(folder=Sent).  Prove the second step files
+    a server-side Sent copy of the just-sent message — the whole point of
+    Finding #1 (mailbox.org does not auto-populate Sent)."""
+    raw = "From: me@example.com\r\nTo: alice@example.com\r\nSubject: hi\r\n\r\nbody"
+
+    send_out = handlers.handle_smtp_send(
+        {"raw_message": raw, "to": ["alice@example.com"]}, _smtp_ctx(),
+    )
+    assert send_out["ok"] is True
+
+    append_out = handlers.handle_imap_append(
+        {"raw_message": raw, "mailbox": "Sent", "flags": ["\\Seen"]}, _imap_ctx(),
+    )
+    assert append_out["ok"] is True
+    assert append_out["mailbox"] == "Sent"
+    # A Sent copy of the exact outgoing message now exists server-side.
+    inst = FakeIMAP.instances[-1]
+    mailbox, _flags, message = inst.appended
+    assert mailbox == "Sent"
+    assert message == raw.encode("utf-8")
+    # The append egressed to the IMAP host (imaps grant), distinct from
+    # the SMTP host the send used — the Sent copy stays in the IMAP grant
+    # class rather than widening smtp.send's egress.
+    assert inst.host == "imap.confirmed-host.example"
+    assert FakeSMTP.instances[-1].host == "smtp.confirmed-host.example"
+
+
 # ── Capability-stack test (real handlers + real CapabilityRegistry) ─
 
 
@@ -350,11 +439,11 @@ def test_capability_stack_dispatch_binds_grant_and_scopes_to_package():
         # Scoping: every verb is owned by THIS package — the exact fact
         # the dispatch gate checks (an arc must carry pkg.<owner>).
         assert capability_grant_for_package(pkg) == "pkg.carpenter-imap-email"
-        for verb in ("imap.fetch", "imap.search", "imap.store", "smtp.send"):
+        for verb in ("imap.fetch", "imap.search", "imap.store", "imap.append", "smtp.send"):
             assert registry.is_capability_verb(verb)
             assert registry.package_for_verb(verb) == pkg
         assert registry.verbs_for_package(pkg) == frozenset(
-            {"imap.fetch", "imap.search", "imap.store", "smtp.send"}
+            {"imap.fetch", "imap.search", "imap.store", "imap.append", "smtp.send"}
         )
         # A different package owns none of these verbs → its arcs would be
         # denied by the gate (verbs_for_package is empty for it).

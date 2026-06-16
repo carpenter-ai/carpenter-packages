@@ -26,10 +26,10 @@ without ever letting a raw email body into the agent's context.
 The Gmail package reaches Google from inside the untrusted EXECUTOR
 using an OAuth bearer it reads from the environment.  This package does
 **not** put credentials or a host inside the executor.  Instead it
-declares four **trusted platform-side capability verbs** — `imap.fetch`,
-`imap.search`, `imap.store`, `smtp.send` — whose handlers run
-parent-side with the mailbox host + credentials the operator confirmed
-at install.  The executor scripts only `dispatch(Label("imap.fetch"),
+declares five **trusted platform-side capability verbs** — `imap.fetch`,
+`imap.search`, `imap.store`, `imap.append`, `smtp.send` — whose handlers
+run parent-side with the mailbox host + credentials the operator
+confirmed at install.  The executor scripts only `dispatch(Label("imap.fetch"),
 {"uid": ...})`; the host and password never leave the platform side.
 
 ## Trust contract

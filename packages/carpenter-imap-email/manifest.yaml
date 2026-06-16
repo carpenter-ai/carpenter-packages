@@ -1,5 +1,5 @@
 name: carpenter-imap-email
-version: "0.1.0"
+version: "0.1.1"
 description: |
   Email assistant package (IMAP/SMTP backend).  The first real consumer
   of Carpenter's package-capability framework: instead of reaching the
@@ -28,9 +28,12 @@ description: |
     graduated through the same REVIEWER + deterministic JUDGE so a typed
     EmailXxxResult receipt reaches chat without consuming the raw IMAP
     response.
-  * Four TRUSTED capability verbs (imap.fetch / imap.search / imap.store
-    / smtp.send) implemented in handlers/imap_smtp.py with stdlib
-    imaplib/smtplib over TLS.
+  * Five TRUSTED capability verbs (imap.fetch / imap.search / imap.store
+    / imap.append / smtp.send) implemented in handlers/imap_smtp.py with
+    stdlib imaplib/smtplib over TLS.  imap.append exists because
+    mailbox.org does NOT auto-file SMTP-sent mail into Sent (unlike
+    Gmail's API): the send flow dispatches smtp.send THEN imap.append
+    (folder=Sent) so a server-side Sent copy exists.
 
   DEFERRED to v0.2.0 (NOT declared here): the inbound UID-poll trigger +
   email.received triage subscription, and the semantic resource index
@@ -206,6 +209,20 @@ platform_capabilities:
       host_from: IMAP_HOST
       port: 993
       credential_ref: IMAP_EMAIL
+  # imap.append files a raw message into a named folder (default Sent).
+  # mailbox.org does NOT auto-populate Sent on a raw SMTP send, so the
+  # send flow APPENDs the outgoing message here AFTER smtp.send.  Shares
+  # the IMAP egress grant (imaps / IMAP_HOST / 993) — the Sent copy stays
+  # inside the IMAP grant class and never widens the smtp.send grant.
+  - verb: imap.append
+    kind: egress
+    module: handlers.imap_smtp
+    handler: handle_imap_append
+    grant:
+      protocol: imaps
+      host_from: IMAP_HOST
+      port: 993
+      credential_ref: IMAP_EMAIL
   - verb: smtp.send
     kind: egress
     module: handlers.imap_smtp
@@ -216,14 +233,13 @@ platform_capabilities:
       port: 465
       credential_ref: IMAP_EMAIL
 
-# Allowlist proposals.  These mailbox.org hosts are PROVISIONAL /
-# UNCONFIRMED — the production provider + account have not been
-# finalised (see README.md and SETUP.md).  Do NOT treat these as the
-# committed endpoints.  They are proposed (not pre-populated) so the
-# operator still confirms each one at install with the standard
-# human-confirm flow; nothing is silently trusted.  The platform's
-# manifest schema only accepts {type, value}, so the provisional status
-# is documented here in comments rather than as a field.
+# Allowlist proposals.  The production provider + account are now
+# CONFIRMED: mailbox.org, account carpenter-ai@mailbox.org, IMAPS on
+# imap.mailbox.org:993 and SMTPS on smtp.mailbox.org:465 (see README.md
+# and SETUP.md).  These are still surfaced as PROPOSALS (not silently
+# pre-populated) so the operator confirms each one at install with the
+# standard human-confirm flow; nothing is trusted without confirmation.
+# The platform's manifest schema only accepts {type, value}.
 allowlist_proposals:
   - type: domain
     value: imap.mailbox.org

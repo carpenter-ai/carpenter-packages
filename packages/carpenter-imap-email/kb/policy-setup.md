@@ -35,10 +35,11 @@ parent-side with egress + credentials.  The operator confirms each verb
 
 ## Allowlist
 
-The package proposes two **provisional** domain allowlist entries
-(`imap.mailbox.org`, `smtp.mailbox.org`) — the production provider is
-not finalised, so treat these as placeholders the operator confirms (or
-replaces) at install.
+The package proposes two domain allowlist entries (`imap.mailbox.org`,
+`smtp.mailbox.org`).  The production provider + account are **confirmed**
+(mailbox.org, `carpenter-ai@mailbox.org`); the operator still confirms
+each entry at install via the standard human-confirm flow — nothing is
+trusted silently.
 
 The email **sender/recipient** allowlist (`SecurityPolicies.email`)
 ships **empty**.  The operator/user adds entries one at a time via

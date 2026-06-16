@@ -9,9 +9,13 @@ framework**.  Where `carpenter-gmail` reaches Google from inside the
 untrusted EXECUTOR (OAuth bearer from `os.environ`, hardcoded
 `gmail.googleapis.com`), this package declares **trusted platform-side
 dispatch verbs** — `imap.fetch`, `imap.search`, `imap.store`,
-`smtp.send` — whose handlers run parent-side with the mailbox host +
-credentials the operator confirmed at install.  The untrusted EXECUTOR
-scripts are **cred-free and host-free**.
+`imap.append`, `smtp.send` — whose handlers run parent-side with the
+mailbox host + credentials the operator confirmed at install.  The
+untrusted EXECUTOR scripts are **cred-free and host-free**.
+
+The confirmed production account is **`carpenter-ai@mailbox.org`**
+(IMAPS `imap.mailbox.org:993`, SMTPS `smtp.mailbox.org:465`); the
+handlers remain provider-agnostic.
 
 **If you just want to use the package**, read [`SETUP.md`](SETUP.md).
 This README is package-developer oriented.
@@ -57,7 +61,7 @@ three IMAP KB articles, README/SETUP) are leaf-only.
 
 ## Capability framework — how host + credentials stay out of the executor
 
-The manifest's `platform_capabilities` section declares four trusted
+The manifest's `platform_capabilities` section declares five trusted
 egress verbs.  Each handler in `handlers/imap_smtp.py` is invoked as
 `handler(params, ctx)` where:
 
@@ -104,11 +108,37 @@ Trust: `pkg_imap_trust_sender` / `pkg_imap_untrust_sender`.
 
 ## Provider / account status
 
-The proposed allowlist hosts (`imap.mailbox.org`, `smtp.mailbox.org`)
-are **PROVISIONAL / unconfirmed** — the production mailbox provider and
-account have not been finalised.  The handlers are provider-agnostic
-(any IMAPS/SMTPS endpoint works); the operator supplies the real host +
-credentials at install.  See `SETUP.md`.
+The production provider + account are **CONFIRMED**: mailbox.org, account
+`carpenter-ai@mailbox.org`, IMAPS on `imap.mailbox.org:993` and SMTPS on
+`smtp.mailbox.org:465`.  The handlers stay provider-agnostic (any
+IMAPS/SMTPS endpoint works); the operator supplies the host + the eight
+`IMAP_EMAIL_*` credentials at install via the per-package `.env`.  See
+`SETUP.md`.
+
+Guard at-rest encryption is **OFF** on this mailbox — messages are
+plaintext-readable, so `imap.fetch` needs no special decryption step.
+
+## Backend behaviours confirmed against mailbox.org
+
+Two provider behaviours differ from the Gmail API backend and are
+load-bearing:
+
+1. **Sent is NOT auto-populated.** A raw SMTP send via `smtp.send`
+   leaves no copy in the `Sent` folder (Gmail's API files sent mail
+   automatically; raw SMTP does not).  So the send flow dispatches
+   `smtp.send` **then** `imap.append` (folder `Sent`, flag `\Seen`) to
+   file a server-side copy.  `imap.append` is a dedicated trusted verb
+   that egresses under the **IMAP** grant (imaps / `IMAP_HOST` / 993) —
+   it does NOT widen `smtp.send`'s grant.  The send receipt records
+   `sent_copy_filed`.  The append is best-effort: the mail is already
+   out the door, so an append failure is reported rather than failing
+   the arc.
+2. **Spam lands in `Junk`, not INBOX.** mailbox.org server-side spam
+   filtering files junk into the `Junk` folder.  This matters for the
+   **deferred** inbound poller (v0.2.0): when it is built it must decide
+   whether to poll INBOX-only or INBOX+Junk.  The MVP does not build the
+   poller; this is documented here as a design constraint for the
+   follow-up.  Folder layout: `INBOX, Sent, Drafts, Trash, Junk`.
 
 ## Testing
 
