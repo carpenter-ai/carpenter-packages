@@ -452,8 +452,12 @@ class ImapPollTrigger(PollableTrigger):
         if typ != "OK":
             raise RuntimeError(f"IMAP SELECT {folder!r} failed: {typ}")
         # imaplib exposes UIDVALIDITY via a separate untagged response.
-        typ, uv = conn.response("UIDVALIDITY")
-        if typ == "OK" and uv and uv[0]:
+        # NB: ``IMAP4.response(code)`` returns ``(code, data)`` — the first
+        # element is the requested code string, NOT ``"OK"`` — so we must
+        # NOT gate on ``typ == "OK"`` here (that always fails).  When the
+        # untagged response is absent, ``data`` is ``[None]``.
+        _typ, uv = conn.response("UIDVALIDITY")
+        if uv and uv[0]:
             raw = uv[0]
             if isinstance(raw, bytes):
                 raw = raw.decode("ascii", errors="replace")
