@@ -46,7 +46,7 @@ do not use the web-login password.
    these "Email App Passwords") and create a new one scoped to mail
    (IMAP/SMTP).
 3. Copy the generated password — you'll paste it into both
-   `IMAP_EMAIL_IMAP_PASSWORD` and `IMAP_EMAIL_SMTP_PASSWORD` below.
+   `EMAIL_IMAP_PASSWORD` and `EMAIL_SMTP_PASSWORD` below.
 
 > **2FA note.** If the web login has two-factor authentication enabled,
 > that does **not** block app-password IMAP/SMTP auth — the app password
@@ -82,38 +82,38 @@ The platform's installer reads `manifest.yaml` and:
    credentials), the operator approves each grant interactively — this
    is platform-level trust, a higher bar than an ordinary chat tool.
    (`imap.append` is what files the Sent copy — see §6.)
-8. Reads the eight `IMAP_EMAIL_*` values from the per-package `.env`.
+8. Reads the eight `EMAIL_*` values from the per-package `.env`.
 
 ## 3. Supply the credentials (per-package `.env`)
 
-The eight `IMAP_EMAIL_*` values live in the package's own `.env` file:
+The eight `EMAIL_*` values live in the package's own `.env` file:
 
 ```
 ~/carpenter/config/packages/carpenter-imap-email/.env   (chmod 600)
 ```
 
-`ctx.secret("IMAP_PASSWORD")` resolves `IMAP_EMAIL_IMAP_PASSWORD` from
+`ctx.secret("IMAP_PASSWORD")` resolves `EMAIL_IMAP_PASSWORD` from
 this file platform-side.  Populate it with these eight keys (use the
 mailbox.org values from §1; the Email App Password goes in both
 `*_PASSWORD` keys):
 
 | Key                        | Value                                  |
 |----------------------------|----------------------------------------|
-| `IMAP_EMAIL_IMAP_HOST`     | `imap.mailbox.org`                     |
-| `IMAP_EMAIL_IMAP_PORT`     | `993`                                  |
-| `IMAP_EMAIL_IMAP_USERNAME` | `carpenter-ai@mailbox.org`             |
-| `IMAP_EMAIL_IMAP_PASSWORD` | your mailbox.org Email App Password    |
-| `IMAP_EMAIL_SMTP_HOST`     | `smtp.mailbox.org`                     |
-| `IMAP_EMAIL_SMTP_PORT`     | `465`                                  |
-| `IMAP_EMAIL_SMTP_USERNAME` | `carpenter-ai@mailbox.org`             |
-| `IMAP_EMAIL_SMTP_PASSWORD` | your mailbox.org Email App Password    |
+| `EMAIL_IMAP_HOST`     | `imap.mailbox.org`                     |
+| `EMAIL_IMAP_PORT`     | `993`                                  |
+| `EMAIL_IMAP_USERNAME` | `carpenter-ai@mailbox.org`             |
+| `EMAIL_IMAP_PASSWORD` | your mailbox.org Email App Password    |
+| `EMAIL_SMTP_HOST`     | `smtp.mailbox.org`                     |
+| `EMAIL_SMTP_PORT`     | `465`                                  |
+| `EMAIL_SMTP_USERNAME` | `carpenter-ai@mailbox.org`             |
+| `EMAIL_SMTP_PASSWORD` | your mailbox.org Email App Password    |
 
 The file format is one `KEY=VALUE` per line.  Keep its mode `600` and
 never commit it.  These resolve **platform-side** when a trusted handler
 runs (via `CapabilityContext.secret`); they are never injected into the
 untrusted executor, never embedded in a script, and never logged.
 
-`IMAP_EMAIL_IMAP_HOST` / `IMAP_EMAIL_SMTP_HOST` also bind the egress
+`EMAIL_IMAP_HOST` / `EMAIL_SMTP_HOST` also bind the egress
 host for the capability grants, so the handler can never point egress
 elsewhere.
 
@@ -170,7 +170,7 @@ To send to a new recipient you must first trust them:
 ## 7. Troubleshooting
 
 - **"expected_account is not configured"** — you haven't set
-  `IMAP_EMAIL_IMAP_USERNAME` (or `operator_email`).  The read/send tools
+  `EMAIL_IMAP_USERNAME` (or `operator_email`).  The read/send tools
   fail closed without an expected account.
 - **`imap.fetch failed` / `smtp.send failed`** — check the host/port and
   app password; confirm your provider allows IMAPS/SMTPS app-password

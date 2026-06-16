@@ -13,7 +13,7 @@ IMAP/SMTP-specific shape:
 * the five TRUSTED platform_capabilities (imap.fetch / imap.search /
   imap.store / imap.append / smtp.send) with their egress grants,
 * the single kind:env credential requirement with the eight
-  IMAP_EMAIL_* keys,
+  EMAIL_* keys,
 * the confirmed mailbox.org allowlist proposals,
 * the KB articles covering the trust-contract surfaces.
 
@@ -95,11 +95,11 @@ class ManifestShape(PackageStory):
 
     # verb -> (handler, protocol, host_from, port, credential_ref)
     _EXPECTED_CAPABILITIES = {
-        "imap.fetch": ("handle_imap_fetch", "imaps", "IMAP_HOST", 993, "IMAP_EMAIL"),
-        "imap.search": ("handle_imap_search", "imaps", "IMAP_HOST", 993, "IMAP_EMAIL"),
-        "imap.store": ("handle_imap_store", "imaps", "IMAP_HOST", 993, "IMAP_EMAIL"),
-        "imap.append": ("handle_imap_append", "imaps", "IMAP_HOST", 993, "IMAP_EMAIL"),
-        "smtp.send": ("handle_smtp_send", "smtps", "SMTP_HOST", 465, "IMAP_EMAIL"),
+        "imap.fetch": ("handle_imap_fetch", "imaps", "IMAP_HOST", 993, "EMAIL"),
+        "imap.search": ("handle_imap_search", "imaps", "IMAP_HOST", 993, "EMAIL"),
+        "imap.store": ("handle_imap_store", "imaps", "IMAP_HOST", 993, "EMAIL"),
+        "imap.append": ("handle_imap_append", "imaps", "IMAP_HOST", 993, "EMAIL"),
+        "smtp.send": ("handle_smtp_send", "smtps", "SMTP_HOST", 465, "EMAIL"),
     }
 
     _EXPECTED_CRED_KEYS = frozenset({
@@ -209,7 +209,7 @@ class ManifestShape(PackageStory):
         )
         cred = manifest.credential_requirements[0]
         self.assert_equal(cred.kind, "env", "credential.kind")
-        self.assert_equal(cred.env_key_prefix, "IMAP_EMAIL", "credential.env_key_prefix")
+        self.assert_equal(cred.env_key_prefix, "EMAIL", "credential.env_key_prefix")
         declared_keys = set(cred.required_keys)
         self.assert_equal(
             declared_keys, self._EXPECTED_CRED_KEYS, "credential required_keys",
@@ -244,7 +244,7 @@ class ManifestShape(PackageStory):
             f"{len(declared_models)} data models, "
             f"{len(templates_by_name)} arc templates, "
             f"{len(caps_by_verb)} platform capabilities, "
-            f"the IMAP_EMAIL env credential, and "
+            f"the EMAIL env credential, and "
             f"{len(declared_slugs)} KB articles, with no deferred "
             f"triggers/subscriptions."
         )
