@@ -101,6 +101,7 @@ def _create_read_arc_tree(
         expected_account_email=expected_account_email,
         conversation_id=conversation_id,
         fetch_script=GMAIL_FETCH_SCRIPT,
+        owner_package="carpenter-gmail",
         raw_source_prefix=_GMAIL_SOURCE_PREFIX,
     )
 
@@ -125,6 +126,7 @@ def _create_triage_arc_tree(
         received_history_id=received_history_id,
         expected_account_email=expected_account_email,
         fetch_script=GMAIL_FETCH_SCRIPT,
+        owner_package="carpenter-gmail",
         raw_source_prefix=_GMAIL_SOURCE_PREFIX,
     )
 
@@ -898,6 +900,7 @@ def _create_write_arc_tree(
         expected_account_email=expected_account_email,
         staged_to_addresses=staged_to_addresses,
         conversation_id=conversation_id,
+        owner_package="carpenter-gmail",
         raw_source_prefix=_GMAIL_SOURCE_PREFIX,
     )
 
@@ -1192,6 +1195,7 @@ def _create_index_arc_tree(
         executor_state_seed=executor_state_seed,
         script=script,
         extract_kind=extract_kind,
+        owner_package="carpenter-gmail",
         raw_source_prefix=_GMAIL_SOURCE_PREFIX,
     )
 

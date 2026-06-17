@@ -120,6 +120,7 @@ def _create_read_arc_tree(
         expected_account_email=expected_account_email,
         conversation_id=conversation_id,
         fetch_script=IMAP_FETCH_SCRIPT,
+        owner_package="carpenter-imap-email",
         raw_source_prefix=_IMAP_SOURCE_PREFIX,
     )
     # The IMAP fetch script also reads ``mailbox`` from EXECUTOR arc
@@ -150,6 +151,7 @@ def _create_triage_arc_tree(
         received_history_id=received_history_id,
         expected_account_email=expected_account_email,
         fetch_script=IMAP_FETCH_SCRIPT,
+        owner_package="carpenter-imap-email",
         raw_source_prefix=_IMAP_SOURCE_PREFIX,
     )
     _seed_mailbox_on_executor(result, _DEFAULT_MAILBOX)
@@ -179,6 +181,7 @@ def _create_write_arc_tree(
         expected_account_email=expected_account_email,
         staged_to_addresses=staged_to_addresses,
         conversation_id=conversation_id,
+        owner_package="carpenter-imap-email",
         raw_source_prefix=_IMAP_SOURCE_PREFIX,
     )
 
