@@ -27,6 +27,7 @@ identity enters is via the caller-supplied arguments above.
 from __future__ import annotations
 
 import base64
+import json as _json
 from email.message import EmailMessage
 
 
@@ -343,6 +344,13 @@ def _create_triage_arc_tree(
             "the JUDGE is deterministic Python (no agent input needed)."
         ),
         agent_type="PLANNER",
+        # Provenance: trigger-driven pipeline (inbound poll → email.received
+        # subscription), no chat conversation.  Children inherit this origin.
+        origin_kind="trigger",
+        origin_ref=_json.dumps({
+            "pipeline": template_name,
+            "account": expected_account_email,
+        }),
     )
     _am.update_status(parent_id, "active")
 
@@ -849,6 +857,10 @@ def _create_index_arc_tree(
             "Python (no agent input needed)."
         ),
         agent_type="PLANNER",
+        # Provenance: trigger-driven indexer pipeline, no chat conversation.
+        # Children inherit this origin.
+        origin_kind="trigger",
+        origin_ref=_json.dumps({"pipeline": "email_index", "phase": phase}),
     )
     _am.update_status(parent_id, "active")
 
