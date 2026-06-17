@@ -70,6 +70,89 @@ def _save_fetch_code_file(fetch_script: str, *, name: str):
     return saved["code_file_id"]
 
 
+def _write_briefing_blob(
+    *,
+    briefing_resource_id: int,
+    briefing_path,
+    expected_account_email: str,
+    staged_to_addresses: tuple[str, ...] = (),
+) -> None:
+    """Write + finalize the born-trusted ``EmailReviewBriefing`` blob.
+
+    The PLANNER goal text *describes* this construction, but the PLANNER
+    has no ``model_policy`` and so never runs — it would freeze.  The
+    briefing content is fully deterministic, so the builder writes it
+    directly here instead:
+
+    * ``expected_account_email`` — the mailbox this operation targets
+      (caller-supplied; the chat-boundary / trigger already resolved it).
+    * ``senders_to_trust`` — a snapshot of the global
+      ``SecurityPolicies.email`` allowlist at PLANNER time.
+    * ``suspicious_keywords`` / ``extract_schema_version`` — the static,
+      package-controlled defaults baked into the
+      :class:`EmailReviewBriefing` dataclass.
+    * ``staged_to_addresses`` — write-side PLANNERs pass the recipient
+      set approved at the chat boundary; read/triage/index pass ``()``.
+
+    The blob is JSON-on-disk — the same encoding the JUDGE-dispatch
+    deserialiser expects for kind-tagged dataclass Resources
+    (``json.loads(text)`` then ``cls(**payload)``).  The briefing itself
+    carries no ``kind`` (it is consumed by the LLM REVIEWER via
+    ``read_resource``, not deserialised by the JUDGE), so the values are
+    emitted as plain JSON strings rather than ``PolicyLiteral`` objects.
+
+    Finalization mirrors the ``resource.finalize`` dispatch: hash the
+    on-disk blob and write ``byte_size`` / ``content_hash`` back to the
+    Resource row so it is no longer NULL and the REVIEWER's
+    ``read_resource`` returns populated content.
+    """
+    from dataclasses import asdict
+
+    from carpenter.core.resources import (
+        hash_file as _hash_file,
+        update_resource_content_stats as _update_resource_content_stats,
+    )
+    from carpenter.security.policies import get_policies as _get_policies
+
+    from .data_models import EmailReviewBriefing
+
+    # Snapshot the global email allowlist (frozenset of normalised
+    # addresses) at PLANNER time so the REVIEWER sees a stable view.
+    senders_snapshot = tuple(sorted(_get_policies().get_allowlist("email")))
+
+    # Construct the dataclass so we pick up the canonical, package-
+    # controlled ``suspicious_keywords`` + ``extract_schema_version``
+    # defaults rather than hand-duplicating them here.
+    briefing = EmailReviewBriefing(
+        expected_account_email=expected_account_email,
+        senders_to_trust=senders_snapshot,
+        staged_to_addresses=tuple(staged_to_addresses),
+    )
+
+    # ``EmailPolicy`` literals are not JSON-serialisable; coerce every
+    # field to a JSON-native form via ``str``.  ``asdict`` flattens the
+    # dataclass; the literal-typed fields come back as their underlying
+    # string value once coerced.
+    payload = asdict(briefing)
+    payload["expected_account_email"] = str(briefing.expected_account_email)
+    payload["senders_to_trust"] = [str(s) for s in briefing.senders_to_trust]
+    payload["suspicious_keywords"] = list(briefing.suspicious_keywords)
+    payload["staged_to_addresses"] = [
+        str(s) for s in briefing.staged_to_addresses
+    ]
+    payload["extract_schema_version"] = str(briefing.extract_schema_version)
+
+    briefing_path.write_text(
+        _json.dumps(payload, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+
+    byte_size, content_hash = _hash_file(briefing_path)
+    _update_resource_content_stats(
+        briefing_resource_id, byte_size, content_hash,
+    )
+
+
 def _create_read_arc_tree(
     *,
     template_name: str,
@@ -254,6 +337,14 @@ def _create_read_arc_tree(
             "UPDATE resources SET file_path = ? WHERE id = ?",
             (str(briefing_path), briefing_resource_id),
         )
+    # The PLANNER goal describes building this briefing, but it has no
+    # model_policy and would freeze; the content is deterministic, so we
+    # write + finalize the born-trusted briefing blob directly here.
+    _write_briefing_blob(
+        briefing_resource_id=briefing_resource_id,
+        briefing_path=briefing_path,
+        expected_account_email=expected_account_email,
+    )
 
     # 5) Extract Resource (REVIEWER -> JUDGE; pending until JUDGE approves)
     extract_kind = EXTRACT_KIND_BY_TEMPLATE[template_name]
@@ -505,6 +596,13 @@ def _create_triage_arc_tree(
             "UPDATE resources SET file_path = ? WHERE id = ?",
             (str(briefing_path), briefing_resource_id),
         )
+    # Deterministic born-trusted briefing (PLANNER would freeze; see
+    # _write_briefing_blob).
+    _write_briefing_blob(
+        briefing_resource_id=briefing_resource_id,
+        briefing_path=briefing_path,
+        expected_account_email=expected_account_email,
+    )
 
     extract_resource_id = _derive_resource(
         content_type="dataclass",
@@ -780,6 +878,15 @@ def _create_write_arc_tree(
             "UPDATE resources SET file_path = ? WHERE id = ?",
             (str(briefing_path), briefing_resource_id),
         )
+    # Deterministic born-trusted briefing (PLANNER would freeze; see
+    # _write_briefing_blob).  Write-side: thread the chat-approved
+    # recipient set so the REVIEWER can cross-check the receipt.
+    _write_briefing_blob(
+        briefing_resource_id=briefing_resource_id,
+        briefing_path=briefing_path,
+        expected_account_email=expected_account_email,
+        staged_to_addresses=tuple(staged_to_addresses),
+    )
 
     # 5) Extract Resource (REVIEWER -> JUDGE; pending until JUDGE approves)
     extract_resource_id = _derive_resource(
@@ -1039,6 +1146,13 @@ def _create_index_arc_tree(
             "UPDATE resources SET file_path = ? WHERE id = ?",
             (str(briefing_path), briefing_resource_id),
         )
+    # Deterministic born-trusted briefing (PLANNER would freeze; see
+    # _write_briefing_blob).
+    _write_briefing_blob(
+        briefing_resource_id=briefing_resource_id,
+        briefing_path=briefing_path,
+        expected_account_email=expected_account_email,
+    )
 
     # Extract Resource (pending until JUDGE).
     extract_resource_id = _derive_resource(

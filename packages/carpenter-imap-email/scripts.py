@@ -48,15 +48,15 @@ from __future__ import annotations
 # and returns the raw RFC-822 text.
 IMAP_FETCH_SCRIPT = '''\
 from carpenter_tools.declarations import Label
-import json as _json
+import json
 
-def _state(key):
+def readread_state(key):
     return dispatch(Label("state.get"), {"key": Label(key)})[Label("value")]
 
-uid               = _state("provider_message_id")
-mailbox           = _state("mailbox")
-raw_resource_path = _state("raw_resource_path")
-raw_resource_id   = _state("raw_resource_id")
+uid               = read_state("provider_message_id")
+mailbox           = read_state("mailbox")
+raw_resource_path = read_state("raw_resource_path")
+raw_resource_id   = read_state("raw_resource_id")
 
 # Reach the mailbox ONLY via the trusted capability verb.  Host + creds
 # come from the operator-confirmed grant, supplied platform-side by the
@@ -73,7 +73,7 @@ if not result.get("ok"):
 # the REVIEWER + JUDGE can graduate a typed extract.
 dispatch(Label("files.write"), {
     "path": raw_resource_path,
-    "content": _json.dumps(result),
+    "content": json.dumps(result),
 })
 dispatch(Label("resource.finalize"), {"resource_id": raw_resource_id})
 '''
@@ -92,16 +92,16 @@ dispatch(Label("resource.finalize"), {"resource_id": raw_resource_id})
 # for the chat tool to parse and fan out per-message read arcs.
 IMAP_SEARCH_SCRIPT = '''\
 from carpenter_tools.declarations import Label
-import json as _json
+import json
 
-def _state(key):
+def readread_state(key):
     return dispatch(Label("state.get"), {"key": Label(key)})[Label("value")]
 
-query             = _state("search_query")
-mailbox           = _state("mailbox")
-max_results       = int(_state("max_results"))
-id_list_path      = _state("id_list_path")
-raw_resource_id   = _state("raw_resource_id")
+query             = read_state("search_query")
+mailbox           = read_state("mailbox")
+max_results       = int(read_state("max_results"))
+id_list_path      = read_state("id_list_path")
+raw_resource_id   = read_state("raw_resource_id")
 
 # Map the free-text query to an allowlisted IMAP search criterion.  The
 # trusted handler validates the key + quotes the term; an empty query
@@ -121,7 +121,7 @@ if not result.get("ok"):
 
 dispatch(Label("files.write"), {
     "path": id_list_path,
-    "content": _json.dumps(result),
+    "content": json.dumps(result),
 })
 dispatch(Label("resource.finalize"), {"resource_id": raw_resource_id})
 '''
@@ -154,18 +154,18 @@ dispatch(Label("resource.finalize"), {"resource_id": raw_resource_id})
 # recorded in the receipt rather than failing the whole arc.
 SMTP_SEND_SCRIPT = '''\
 from carpenter_tools.declarations import Label
-import json as _json
+import json
 
-def _state(key):
+def readread_state(key):
     return dispatch(Label("state.get"), {"key": Label(key)})[Label("value")]
 
-raw_message       = _state("raw_message_b64")
-to_json           = _state("to_addresses_json")
-sent_mailbox      = _state("sent_mailbox")
-raw_resource_path = _state("raw_resource_path")
-raw_resource_id   = _state("raw_resource_id")
+raw_message       = read_state("raw_message_b64")
+to_json           = read_state("to_addresses_json")
+sent_mailbox      = read_state("sent_mailbox")
+raw_resource_path = read_state("raw_resource_path")
+raw_resource_id   = read_state("raw_resource_id")
 
-to_addresses = _json.loads(to_json)
+to_addresses = json.loads(to_json)
 if not isinstance(to_addresses, list):
     raise RuntimeError("to_addresses_json must be a JSON array")
 
@@ -194,7 +194,7 @@ receipt = {
 }
 dispatch(Label("files.write"), {
     "path": raw_resource_path,
-    "content": _json.dumps(receipt),
+    "content": json.dumps(receipt),
 })
 dispatch(Label("resource.finalize"), {"resource_id": raw_resource_id})
 '''
@@ -222,15 +222,15 @@ dispatch(Label("resource.finalize"), {"resource_id": raw_resource_id})
 #   * raw_resource_id        : int
 IMAP_DRAFT_SCRIPT = '''\
 from carpenter_tools.declarations import Label
-import json as _json
+import json
 
-def _state(key):
+def readread_state(key):
     return dispatch(Label("state.get"), {"key": Label(key)})[Label("value")]
 
-raw_message       = _state("raw_message_b64")
-mailbox           = _state("mailbox")
-raw_resource_path = _state("raw_resource_path")
-raw_resource_id   = _state("raw_resource_id")
+raw_message       = read_state("raw_message_b64")
+mailbox           = read_state("mailbox")
+raw_resource_path = read_state("raw_resource_path")
+raw_resource_id   = read_state("raw_resource_id")
 
 # Append the message to the Drafts mailbox via the trusted imap.store
 # verb (append mode).  The handler supplies host + creds.
@@ -252,7 +252,7 @@ receipt = {
 }
 dispatch(Label("files.write"), {
     "path": raw_resource_path,
-    "content": _json.dumps(receipt),
+    "content": json.dumps(receipt),
 })
 dispatch(Label("resource.finalize"), {"resource_id": raw_resource_id})
 '''
@@ -273,15 +273,15 @@ dispatch(Label("resource.finalize"), {"resource_id": raw_resource_id})
 # was_already_archived.
 IMAP_ARCHIVE_SCRIPT = '''\
 from carpenter_tools.declarations import Label
-import json as _json
+import json
 
-def _state(key):
+def readread_state(key):
     return dispatch(Label("state.get"), {"key": Label(key)})[Label("value")]
 
-uid               = _state("provider_message_id")
-mailbox           = _state("mailbox")
-raw_resource_path = _state("raw_resource_path")
-raw_resource_id   = _state("raw_resource_id")
+uid               = read_state("provider_message_id")
+mailbox           = read_state("mailbox")
+raw_resource_path = read_state("raw_resource_path")
+raw_resource_id   = read_state("raw_resource_id")
 
 result = dispatch(Label("imap.store"), {
     "uid": uid,
@@ -303,7 +303,7 @@ receipt = {
 }
 dispatch(Label("files.write"), {
     "path": raw_resource_path,
-    "content": _json.dumps(receipt),
+    "content": json.dumps(receipt),
 })
 dispatch(Label("resource.finalize"), {"resource_id": raw_resource_id})
 '''
@@ -314,15 +314,15 @@ dispatch(Label("resource.finalize"), {"resource_id": raw_resource_id})
 # Pre-seeded arc state: identical to the archive script.
 IMAP_MARK_READ_SCRIPT = '''\
 from carpenter_tools.declarations import Label
-import json as _json
+import json
 
-def _state(key):
+def readread_state(key):
     return dispatch(Label("state.get"), {"key": Label(key)})[Label("value")]
 
-uid               = _state("provider_message_id")
-mailbox           = _state("mailbox")
-raw_resource_path = _state("raw_resource_path")
-raw_resource_id   = _state("raw_resource_id")
+uid               = read_state("provider_message_id")
+mailbox           = read_state("mailbox")
+raw_resource_path = read_state("raw_resource_path")
+raw_resource_id   = read_state("raw_resource_id")
 
 result = dispatch(Label("imap.store"), {
     "uid": uid,
@@ -344,7 +344,7 @@ receipt = {
 }
 dispatch(Label("files.write"), {
     "path": raw_resource_path,
-    "content": _json.dumps(receipt),
+    "content": json.dumps(receipt),
 })
 dispatch(Label("resource.finalize"), {"resource_id": raw_resource_id})
 '''

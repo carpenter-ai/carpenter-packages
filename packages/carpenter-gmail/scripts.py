@@ -95,7 +95,7 @@ dispatch(Label("resource.finalize"), {"resource_id": raw_resource_id})
 GMAIL_SEND_SCRIPT = '''\
 from carpenter_tools.declarations import Label
 import os
-import json as _json
+import json
 
 raw_result = dispatch(Label("state.get"), {"key": Label("raw_message_b64")})
 raw_b64 = raw_result[Label("value")]
@@ -123,7 +123,7 @@ if who_status != 200:
     raise RuntimeError(
         "userinfo lookup failed: status=" + str(who_status)
     )
-who_body = _json.loads(who[Label("text")])
+who_body = json.loads(who[Label("text")])
 actual = (who_body.get("email") or "").strip().lower()
 if actual != (expected or "").strip().lower():
     raise RuntimeError(
@@ -146,7 +146,7 @@ if send_status not in (200, 202):
         "Gmail send failed: status=" + str(send_status)
         + " body=" + send_result[Label("text")][:200]
     )
-send_body = _json.loads(send_result[Label("text")])
+send_body = json.loads(send_result[Label("text")])
 provider_message_id = send_body.get("id") or ""
 
 # Step 3: write a structured receipt for the REVIEWER + JUDGE.
@@ -158,7 +158,7 @@ receipt = {
 }
 dispatch(Label("files.write"), {
     "path": output_path,
-    "content": _json.dumps(receipt),
+    "content": json.dumps(receipt),
 })
 dispatch(Label("resource.finalize"), {"resource_id": raw_resource_id})
 '''
@@ -236,7 +236,7 @@ dispatch(Label("resource.finalize"), {"resource_id": raw_resource_id})
 GMAIL_ARCHIVE_SCRIPT = '''\
 from carpenter_tools.declarations import Label
 import os
-import json as _json
+import json
 
 mid_result = dispatch(Label("state.get"), {"key": Label("provider_message_id")})
 mid = mid_result[Label("value")]
@@ -264,7 +264,7 @@ if who_status != 200:
     raise RuntimeError(
         "userinfo lookup failed: status=" + str(who_status)
     )
-who_body = _json.loads(who[Label("text")])
+who_body = json.loads(who[Label("text")])
 actual = (who_body.get("email") or "").strip().lower()
 if actual != (expected or "").strip().lower():
     raise RuntimeError(
@@ -287,7 +287,7 @@ if meta_status != 200:
     raise RuntimeError(
         "Gmail metadata GET failed: status=" + str(meta_status)
     )
-meta_body = _json.loads(meta[Label("text")])
+meta_body = json.loads(meta[Label("text")])
 current_labels = meta_body.get("labelIds") or []
 was_already_archived = "INBOX" not in current_labels
 
@@ -322,7 +322,7 @@ receipt = {
 }
 dispatch(Label("files.write"), {
     "path": output_path,
-    "content": _json.dumps(receipt),
+    "content": json.dumps(receipt),
 })
 dispatch(Label("resource.finalize"), {"resource_id": raw_resource_id})
 '''
@@ -343,7 +343,7 @@ dispatch(Label("resource.finalize"), {"resource_id": raw_resource_id})
 GMAIL_MARK_READ_SCRIPT = '''\
 from carpenter_tools.declarations import Label
 import os
-import json as _json
+import json
 
 mid_result = dispatch(Label("state.get"), {"key": Label("provider_message_id")})
 mid = mid_result[Label("value")]
@@ -371,7 +371,7 @@ if who_status != 200:
     raise RuntimeError(
         "userinfo lookup failed: status=" + str(who_status)
     )
-who_body = _json.loads(who[Label("text")])
+who_body = json.loads(who[Label("text")])
 actual = (who_body.get("email") or "").strip().lower()
 if actual != (expected or "").strip().lower():
     raise RuntimeError(
@@ -394,7 +394,7 @@ if meta_status != 200:
     raise RuntimeError(
         "Gmail metadata GET failed: status=" + str(meta_status)
     )
-meta_body = _json.loads(meta[Label("text")])
+meta_body = json.loads(meta[Label("text")])
 current_labels = meta_body.get("labelIds") or []
 was_already_read = "UNREAD" not in current_labels
 
@@ -429,7 +429,7 @@ receipt = {
 }
 dispatch(Label("files.write"), {
     "path": output_path,
-    "content": _json.dumps(receipt),
+    "content": json.dumps(receipt),
 })
 dispatch(Label("resource.finalize"), {"resource_id": raw_resource_id})
 '''
@@ -453,7 +453,7 @@ dispatch(Label("resource.finalize"), {"resource_id": raw_resource_id})
 GMAIL_DRAFT_SCRIPT = '''\
 from carpenter_tools.declarations import Label
 import os
-import json as _json
+import json
 
 raw_result = dispatch(Label("state.get"), {"key": Label("raw_message_b64")})
 raw_b64 = raw_result[Label("value")]
@@ -481,7 +481,7 @@ if who_status != 200:
     raise RuntimeError(
         "userinfo lookup failed: status=" + str(who_status)
     )
-who_body = _json.loads(who[Label("text")])
+who_body = json.loads(who[Label("text")])
 actual = (who_body.get("email") or "").strip().lower()
 if actual != (expected or "").strip().lower():
     raise RuntimeError(
@@ -504,7 +504,7 @@ if draft_status not in (200, 202):
         "Gmail draft create failed: status=" + str(draft_status)
         + " body=" + draft_result[Label("text")][:200]
     )
-draft_body = _json.loads(draft_result[Label("text")])
+draft_body = json.loads(draft_result[Label("text")])
 draft_id = draft_body.get("id") or ""
 message = draft_body.get("message") or {}
 provider_message_id = message.get("id") or ""
@@ -519,7 +519,7 @@ receipt = {
 }
 dispatch(Label("files.write"), {
     "path": output_path,
-    "content": _json.dumps(receipt),
+    "content": json.dumps(receipt),
 })
 dispatch(Label("resource.finalize"), {"resource_id": raw_resource_id})
 '''
@@ -561,20 +561,20 @@ dispatch(Label("resource.finalize"), {"resource_id": raw_resource_id})
 GMAIL_INDEX_PHASE1_SCRIPT = '''\
 from carpenter_tools.declarations import Label
 import os
-import json as _json
+import json
 
 # ----- inputs ---------------------------------------------------------
-def _state(key):
+def readread_state(key):
     return dispatch(Label("state.get"), {"key": Label(key)})[Label("value")]
 
-raw_resource_path     = _state("raw_resource_path")
-raw_resource_id       = _state("raw_resource_id")
-expected_account      = _state("expected_account_email")
-model_identity        = _state("model_identity")
-batch_id              = _state("batch_id")
-phase                 = _state("phase")
-watermark_before = _state("watermark_before")
-max_batch        = int(_state("max_batch"))
+raw_resource_path     = read_state("raw_resource_path")
+raw_resource_id       = read_state("raw_resource_id")
+expected_account      = read_state("expected_account_email")
+model_identity        = read_state("model_identity")
+batch_id              = read_state("batch_id")
+phase                 = read_state("phase")
+watermark_before = read_state("watermark_before")
+max_batch        = int(read_state("max_batch"))
 if max_batch < 1:
     max_batch = 1
 if max_batch > 100:
@@ -591,7 +591,7 @@ who = dispatch(Label("web.get"), {
 })
 if who[Label("status_code")] != 200:
     raise RuntimeError("userinfo lookup failed: " + str(who[Label("status_code")]))
-who_body = _json.loads(who[Label("text")])
+who_body = json.loads(who[Label("text")])
 actual = (who_body.get("email") or "").strip().lower()
 if actual != (expected_account or "").strip().lower():
     raise RuntimeError(
@@ -613,7 +613,7 @@ if list_result[Label("status_code")] != 200:
         "messages.list failed: " + str(list_result[Label("status_code")])
         + " body=" + list_result[Label("text")][:200]
     )
-list_body = _json.loads(list_result[Label("text")])
+list_body = json.loads(list_result[Label("text")])
 ids = [m.get("id") or "" for m in (list_body.get("messages") or [])]
 ids = [mid for mid in ids if mid]
 
@@ -638,7 +638,7 @@ for mid in ids:
     if meta[Label("status_code")] != 200:
         skipped += 1
         continue
-    m = _json.loads(meta[Label("text")])
+    m = json.loads(meta[Label("text")])
     headers = {h.get("name", ""): h.get("value", "") for h in (m.get("payload") or {}).get("headers", [])}
     internal_date = m.get("internalDate") or ""
     # Skip past-watermark messages (descending walk).
@@ -680,7 +680,7 @@ batch = {
 
 dispatch(Label("files.write"), {
     "path": raw_resource_path,
-    "content": _json.dumps(batch),
+    "content": json.dumps(batch),
 })
 dispatch(Label("resource.finalize"), {"resource_id": raw_resource_id})
 '''
@@ -693,20 +693,20 @@ dispatch(Label("resource.finalize"), {"resource_id": raw_resource_id})
 GMAIL_INDEX_PHASE2_SCRIPT = '''\
 from carpenter_tools.declarations import Label
 import os
-import json as _json
+import json
 
-def _state(key):
+def readread_state(key):
     return dispatch(Label("state.get"), {"key": Label(key)})[Label("value")]
 
-raw_resource_path = _state("raw_resource_path")
-raw_resource_id   = _state("raw_resource_id")
-expected_account  = _state("expected_account_email")
-model_identity    = _state("model_identity")
-batch_id          = _state("batch_id")
-phase             = _state("phase")
-message_ids_json  = _state("message_ids_json")
+raw_resource_path = read_state("raw_resource_path")
+raw_resource_id   = read_state("raw_resource_id")
+expected_account  = read_state("expected_account_email")
+model_identity    = read_state("model_identity")
+batch_id          = read_state("batch_id")
+phase             = read_state("phase")
+message_ids_json  = read_state("message_ids_json")
 
-ids = _json.loads(message_ids_json)
+ids = json.loads(message_ids_json)
 if not isinstance(ids, list):
     raise RuntimeError("message_ids_json must be a JSON array")
 ids = [str(x) for x in ids if isinstance(x, str) and x][:100]
@@ -721,7 +721,7 @@ who = dispatch(Label("web.get"), {
 })
 if who[Label("status_code")] != 200:
     raise RuntimeError("userinfo lookup failed: " + str(who[Label("status_code")]))
-who_body = _json.loads(who[Label("text")])
+who_body = json.loads(who[Label("text")])
 actual = (who_body.get("email") or "").strip().lower()
 if actual != (expected_account or "").strip().lower():
     raise RuntimeError("expected-account check failed: token=" + repr(actual))
@@ -744,7 +744,7 @@ for mid in ids:
     if meta[Label("status_code")] != 200:
         skipped += 1
         continue
-    m = _json.loads(meta[Label("text")])
+    m = json.loads(meta[Label("text")])
     headers = {h.get("name", ""): h.get("value", "") for h in (m.get("payload") or {}).get("headers", [])}
     entries.append({
         "provider_message_id": m.get("id") or mid,
@@ -776,7 +776,7 @@ batch = {
 
 dispatch(Label("files.write"), {
     "path": raw_resource_path,
-    "content": _json.dumps(batch),
+    "content": json.dumps(batch),
 })
 dispatch(Label("resource.finalize"), {"resource_id": raw_resource_id})
 '''
@@ -793,18 +793,18 @@ dispatch(Label("resource.finalize"), {"resource_id": raw_resource_id})
 GMAIL_INDEX_INCREMENTAL_SCRIPT = '''\
 from carpenter_tools.declarations import Label
 import os
-import json as _json
+import json
 
-def _state(key):
+def readread_state(key):
     return dispatch(Label("state.get"), {"key": Label(key)})[Label("value")]
 
-raw_resource_path = _state("raw_resource_path")
-raw_resource_id   = _state("raw_resource_id")
-expected_account  = _state("expected_account_email")
-model_identity    = _state("model_identity")
-batch_id          = _state("batch_id")
-phase             = _state("phase")
-start_history_id  = _state("start_history_id")
+raw_resource_path = read_state("raw_resource_path")
+raw_resource_id   = read_state("raw_resource_id")
+expected_account  = read_state("expected_account_email")
+model_identity    = read_state("model_identity")
+batch_id          = read_state("batch_id")
+phase             = read_state("phase")
+start_history_id  = read_state("start_history_id")
 
 if not start_history_id:
     raise RuntimeError("start_history_id is required for incremental phase")
@@ -819,7 +819,7 @@ who = dispatch(Label("web.get"), {
 })
 if who[Label("status_code")] != 200:
     raise RuntimeError("userinfo lookup failed: " + str(who[Label("status_code")]))
-who_body = _json.loads(who[Label("text")])
+who_body = json.loads(who[Label("text")])
 actual = (who_body.get("email") or "").strip().lower()
 if actual != (expected_account or "").strip().lower():
     raise RuntimeError("expected-account check failed: token=" + repr(actual))
@@ -852,7 +852,7 @@ if hist_status == 404:
     }
     dispatch(Label("files.write"), {
         "path": raw_resource_path,
-        "content": _json.dumps(batch),
+        "content": json.dumps(batch),
     })
     dispatch(Label("resource.finalize"), {"resource_id": raw_resource_id})
 elif hist_status != 200:
@@ -861,7 +861,7 @@ elif hist_status != 200:
         + " body=" + hist[Label("text")][:200]
     )
 else:
-    hist_body = _json.loads(hist[Label("text")])
+    hist_body = json.loads(hist[Label("text")])
     new_history_id = hist_body.get("historyId") or start_history_id
     added_ids = []
     for entry in (hist_body.get("history") or ()):
@@ -898,7 +898,7 @@ else:
         if meta[Label("status_code")] != 200:
             skipped += 1
             continue
-        m = _json.loads(meta[Label("text")])
+        m = json.loads(meta[Label("text")])
         headers = {h.get("name", ""): h.get("value", "") for h in (m.get("payload") or {}).get("headers", [])}
         entries.append({
             "provider_message_id": m.get("id") or mid,
@@ -929,7 +929,7 @@ else:
     }
     dispatch(Label("files.write"), {
         "path": raw_resource_path,
-        "content": _json.dumps(batch),
+        "content": json.dumps(batch),
     })
     dispatch(Label("resource.finalize"), {"resource_id": raw_resource_id})
 '''
