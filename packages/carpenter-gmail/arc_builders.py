@@ -48,6 +48,111 @@ _WRITE_EXTRACT_KIND_BY_TEMPLATE = {
 }
 
 
+def _save_fetch_code_file(fetch_script: str, *, name: str):
+    """Persist a package-authored pre-verified fetch script as a code_file.
+
+    Returns its ``code_file_id`` so the EXECUTOR arc can be seeded to run
+    it directly via the ``execute_code`` dispatch action (which exposes the
+    capability dispatch bridge) rather than the ``invoke_agent`` /
+    ``submit_code`` path (whose verifier rejects scripts that call
+    ``dispatch()`` directly).
+
+    The script reads all of its inputs from arc state at run time, so it
+    has no dependency on arc ids and can be saved before the batch.
+    """
+    from carpenter.core import code_manager as _code_manager
+
+    saved = _code_manager.save_code(
+        fetch_script,
+        source="template",
+        name=name,
+    )
+    return saved["code_file_id"]
+
+
+def _write_briefing_blob(
+    *,
+    briefing_resource_id: int,
+    briefing_path,
+    expected_account_email: str,
+    staged_to_addresses: tuple[str, ...] = (),
+) -> None:
+    """Write + finalize the born-trusted ``EmailReviewBriefing`` blob.
+
+    The PLANNER goal text *describes* this construction, but the PLANNER
+    has no ``model_policy`` and so never runs — it would freeze.  The
+    briefing content is fully deterministic, so the builder writes it
+    directly here instead:
+
+    * ``expected_account_email`` — the mailbox this operation targets
+      (caller-supplied; the chat-boundary / trigger already resolved it).
+    * ``senders_to_trust`` — a snapshot of the global
+      ``SecurityPolicies.email`` allowlist at PLANNER time.
+    * ``suspicious_keywords`` / ``extract_schema_version`` — the static,
+      package-controlled defaults baked into the
+      :class:`EmailReviewBriefing` dataclass.
+    * ``staged_to_addresses`` — write-side PLANNERs pass the recipient
+      set approved at the chat boundary; read/triage/index pass ``()``.
+
+    The blob is JSON-on-disk — the same encoding the JUDGE-dispatch
+    deserialiser expects for kind-tagged dataclass Resources
+    (``json.loads(text)`` then ``cls(**payload)``).  The briefing itself
+    carries no ``kind`` (it is consumed by the LLM REVIEWER via
+    ``read_resource``, not deserialised by the JUDGE), so the values are
+    emitted as plain JSON strings rather than ``PolicyLiteral`` objects.
+
+    Finalization mirrors the ``resource.finalize`` dispatch: hash the
+    on-disk blob and write ``byte_size`` / ``content_hash`` back to the
+    Resource row so it is no longer NULL and the REVIEWER's
+    ``read_resource`` returns populated content.
+    """
+    from dataclasses import asdict
+
+    from carpenter.core.resources import (
+        hash_file as _hash_file,
+        update_resource_content_stats as _update_resource_content_stats,
+    )
+    from carpenter.security.policies import get_policies as _get_policies
+
+    from .data_models import EmailReviewBriefing
+
+    # Snapshot the global email allowlist (frozenset of normalised
+    # addresses) at PLANNER time so the REVIEWER sees a stable view.
+    senders_snapshot = tuple(sorted(_get_policies().get_allowlist("email")))
+
+    # Construct the dataclass so we pick up the canonical, package-
+    # controlled ``suspicious_keywords`` + ``extract_schema_version``
+    # defaults rather than hand-duplicating them here.
+    briefing = EmailReviewBriefing(
+        expected_account_email=expected_account_email,
+        senders_to_trust=senders_snapshot,
+        staged_to_addresses=tuple(staged_to_addresses),
+    )
+
+    # ``EmailPolicy`` literals are not JSON-serialisable; coerce every
+    # field to a JSON-native form via ``str``.  ``asdict`` flattens the
+    # dataclass; the literal-typed fields come back as their underlying
+    # string value once coerced.
+    payload = asdict(briefing)
+    payload["expected_account_email"] = str(briefing.expected_account_email)
+    payload["senders_to_trust"] = [str(s) for s in briefing.senders_to_trust]
+    payload["suspicious_keywords"] = list(briefing.suspicious_keywords)
+    payload["staged_to_addresses"] = [
+        str(s) for s in briefing.staged_to_addresses
+    ]
+    payload["extract_schema_version"] = str(briefing.extract_schema_version)
+
+    briefing_path.write_text(
+        _json.dumps(payload, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+
+    byte_size, content_hash = _hash_file(briefing_path)
+    _update_resource_content_stats(
+        briefing_resource_id, byte_size, content_hash,
+    )
+
+
 def _create_read_arc_tree(
     *,
     template_name: str,
@@ -55,6 +160,7 @@ def _create_read_arc_tree(
     expected_account_email: str,
     conversation_id: int | None,
     fetch_script: str,
+    owner_package: str,
     raw_source_prefix: str = "email",
 ) -> dict:
     """Spin up the PLANNER -> EXECUTOR -> REVIEWER -> JUDGE arc tree
@@ -88,6 +194,13 @@ def _create_read_arc_tree(
     from carpenter.db import db_transaction as _db_transaction
     from carpenter.tool_backends import arc as arc_backend
 
+    # Pre-seed the package-authored fetch script as a code_file so the
+    # EXECUTOR arc runs it directly via execute_code (capability dispatch
+    # bridge available) instead of the submit_code verifier path.
+    fetch_code_file_id = _save_fetch_code_file(
+        fetch_script, name=f"{owner_package}_read_fetch",
+    )
+
     # 1) Parent PLANNER
     parent_id = _am.create_arc(
         name=f"Email read: {template_name}",
@@ -114,17 +227,20 @@ def _create_read_arc_tree(
             {
                 "name": f"Fetch Gmail message {provider_message_id[:16]}",
                 "goal": (
-                    "Submit this EXACT code via submit_code (do not "
-                    "modify it):\n```python\n"
-                    + fetch_script
-                    + "```\nAll inputs (provider_message_id, "
-                    "raw_resource_path, raw_resource_id) have been "
-                    "pre-seeded in arc state."
+                    "Run the pre-verified, package-authored fetch script "
+                    "(seeded as this arc's code_file). It reads "
+                    "provider_message_id, raw_resource_path and "
+                    "raw_resource_id from arc state, calls the brokered "
+                    "imap/gmail fetch capability, writes the provider JSON "
+                    "to the raw Resource blob, and finalizes it. No agent "
+                    "input is required — this arc dispatches via "
+                    "execute_code."
                 ),
                 "parent_id": parent_id,
                 "integrity_level": "untrusted",
                 "output_type": "json",
                 "agent_type": "EXECUTOR",
+                "code_file_id": fetch_code_file_id,
                 "step_order": 0,
             },
             {
@@ -221,6 +337,14 @@ def _create_read_arc_tree(
             "UPDATE resources SET file_path = ? WHERE id = ?",
             (str(briefing_path), briefing_resource_id),
         )
+    # The PLANNER goal describes building this briefing, but it has no
+    # model_policy and would freeze; the content is deterministic, so we
+    # write + finalize the born-trusted briefing blob directly here.
+    _write_briefing_blob(
+        briefing_resource_id=briefing_resource_id,
+        briefing_path=briefing_path,
+        expected_account_email=expected_account_email,
+    )
 
     # 5) Extract Resource (REVIEWER -> JUDGE; pending until JUDGE approves)
     extract_kind = EXTRACT_KIND_BY_TEMPLATE[template_name]
@@ -258,6 +382,11 @@ def _create_read_arc_tree(
     )
 
     # 7) Pre-seed arc state
+    # Grant the EXECUTOR its own package's capability so the dispatch
+    # bridge (fail-closed) permits the package's brokered fetch verb when
+    # the pre-verified script runs.  This is the legitimate per-arc grant
+    # the package's own arcs are entitled to — not a bypass of the gate.
+    set_arc_state(executor_arc_id, "_capabilities", [f"pkg.{owner_package}"])
     set_arc_state(executor_arc_id, "provider_message_id", provider_message_id)
     set_arc_state(executor_arc_id, "raw_resource_path", str(raw_path))
     set_arc_state(executor_arc_id, "raw_resource_id", raw_resource_id)
@@ -299,6 +428,7 @@ def _create_triage_arc_tree(
     received_history_id: str,
     expected_account_email: str,
     fetch_script: str,
+    owner_package: str,
     raw_source_prefix: str = "email",
 ) -> dict:
     """Spin up the ``email_triage`` arc tree for one inbound message.
@@ -329,6 +459,12 @@ def _create_triage_arc_tree(
 
     template_name = "email_triage"
     extract_kind = "EmailTriageExtract"
+
+    # Pre-seed the package-authored fetch script as a code_file (see
+    # _create_read_arc_tree for the rationale).
+    fetch_code_file_id = _save_fetch_code_file(
+        fetch_script, name=f"{owner_package}_triage_fetch",
+    )
 
     parent_id = _am.create_arc(
         name=f"Email triage: {provider_message_id[:16]}",
@@ -361,17 +497,20 @@ def _create_triage_arc_tree(
                     f"Triage-fetch Gmail message {provider_message_id[:16]}"
                 ),
                 "goal": (
-                    "Submit this EXACT code via submit_code (do not "
-                    "modify it):\n```python\n"
-                    + fetch_script
-                    + "```\nAll inputs (provider_message_id, "
-                    "raw_resource_path, raw_resource_id) have been "
-                    "pre-seeded in arc state."
+                    "Run the pre-verified, package-authored fetch script "
+                    "(seeded as this arc's code_file). It reads "
+                    "provider_message_id, raw_resource_path and "
+                    "raw_resource_id from arc state, calls the brokered "
+                    "imap/gmail fetch capability, writes the provider JSON "
+                    "to the raw Resource blob, and finalizes it. No agent "
+                    "input is required — this arc dispatches via "
+                    "execute_code."
                 ),
                 "parent_id": parent_id,
                 "integrity_level": "untrusted",
                 "output_type": "json",
                 "agent_type": "EXECUTOR",
+                "code_file_id": fetch_code_file_id,
                 "step_order": 0,
             },
             {
@@ -457,6 +596,13 @@ def _create_triage_arc_tree(
             "UPDATE resources SET file_path = ? WHERE id = ?",
             (str(briefing_path), briefing_resource_id),
         )
+    # Deterministic born-trusted briefing (PLANNER would freeze; see
+    # _write_briefing_blob).
+    _write_briefing_blob(
+        briefing_resource_id=briefing_resource_id,
+        briefing_path=briefing_path,
+        expected_account_email=expected_account_email,
+    )
 
     extract_resource_id = _derive_resource(
         content_type="dataclass",
@@ -491,6 +637,9 @@ def _create_triage_arc_tree(
     )
 
     # Pre-seed arc state.
+    # Grant the EXECUTOR its own package capability (fail-closed dispatch
+    # gate; see _create_read_arc_tree).
+    set_arc_state(executor_arc_id, "_capabilities", [f"pkg.{owner_package}"])
     set_arc_state(executor_arc_id, "provider_message_id", provider_message_id)
     set_arc_state(executor_arc_id, "raw_resource_path", str(raw_path))
     set_arc_state(executor_arc_id, "raw_resource_id", raw_resource_id)
@@ -547,6 +696,7 @@ def _create_write_arc_tree(
     expected_account_email: str,
     staged_to_addresses: tuple[str, ...],
     conversation_id: int | None,
+    owner_package: str,
     raw_source_prefix: str = "email",
 ) -> dict:
     """Spin up the PLANNER -> EXECUTOR -> REVIEWER -> JUDGE arc tree
@@ -599,6 +749,12 @@ def _create_write_arc_tree(
 
     extract_kind = _WRITE_EXTRACT_KIND_BY_TEMPLATE[template_name]
 
+    # Pre-seed the package-authored write script as a code_file (see
+    # _create_read_arc_tree for the rationale).
+    write_code_file_id = _save_fetch_code_file(
+        script, name=f"{owner_package}_{template_name}",
+    )
+
     # 1) Parent PLANNER
     parent_id = _am.create_arc(
         name=arc_name,
@@ -616,17 +772,20 @@ def _create_write_arc_tree(
             {
                 "name": f"Gmail {template_name}",
                 "goal": (
-                    "Submit this EXACT code via submit_code (do not "
-                    "modify it):\n```python\n"
-                    + script
-                    + "```\nAll inputs (operation payload, "
-                    "expected_account_email, raw_resource_path, "
-                    "raw_resource_id) have been pre-seeded in arc state."
+                    "Run the pre-verified, package-authored write script "
+                    "(seeded as this arc's code_file). It reads the "
+                    "operation payload, expected_account_email, "
+                    "raw_resource_path and raw_resource_id from arc state, "
+                    "performs the brokered external-effect operation, "
+                    "writes a JSON receipt to the raw Resource blob, and "
+                    "finalizes it. No agent input is required — this arc "
+                    "dispatches via execute_code."
                 ),
                 "parent_id": parent_id,
                 "integrity_level": "untrusted",
                 "output_type": "json",
                 "agent_type": "EXECUTOR",
+                "code_file_id": write_code_file_id,
                 "step_order": 0,
             },
             {
@@ -719,6 +878,15 @@ def _create_write_arc_tree(
             "UPDATE resources SET file_path = ? WHERE id = ?",
             (str(briefing_path), briefing_resource_id),
         )
+    # Deterministic born-trusted briefing (PLANNER would freeze; see
+    # _write_briefing_blob).  Write-side: thread the chat-approved
+    # recipient set so the REVIEWER can cross-check the receipt.
+    _write_briefing_blob(
+        briefing_resource_id=briefing_resource_id,
+        briefing_path=briefing_path,
+        expected_account_email=expected_account_email,
+        staged_to_addresses=tuple(staged_to_addresses),
+    )
 
     # 5) Extract Resource (REVIEWER -> JUDGE; pending until JUDGE approves)
     extract_resource_id = _derive_resource(
@@ -757,6 +925,9 @@ def _create_write_arc_tree(
     # 7) Pre-seed arc state on the EXECUTOR.  Caller-supplied keys
     # (the script's operation payload) plus the raw-Resource wiring
     # plus the expected-account check input.
+    # Grant the EXECUTOR its own package capability (fail-closed dispatch
+    # gate; see _create_read_arc_tree).
+    set_arc_state(executor_arc_id, "_capabilities", [f"pkg.{owner_package}"])
     seed = dict(state_seed)
     seed.setdefault("expected_account_email", expected_account_email)
     seed["raw_resource_path"] = str(raw_path)
@@ -812,6 +983,7 @@ def _create_index_arc_tree(
     executor_state_seed: dict,
     script: str,
     extract_kind: str,
+    owner_package: str,
     raw_source_prefix: str = "email",
 ) -> dict:
     """Spin up one PLANNER -> EXECUTOR -> REVIEWER -> JUDGE arc tree
@@ -842,6 +1014,12 @@ def _create_index_arc_tree(
     from carpenter.db import db_transaction as _db_transaction
     from carpenter.tool_backends import arc as arc_backend
 
+    # Pre-seed the package-authored index script as a code_file (see
+    # _create_read_arc_tree for the rationale).
+    index_code_file_id = _save_fetch_code_file(
+        script, name=f"{owner_package}_index_{phase}",
+    )
+
     parent_id = _am.create_arc(
         name=f"Email index {phase}: {batch_id[:16]}",
         goal=(
@@ -869,17 +1047,19 @@ def _create_index_arc_tree(
             {
                 "name": f"Index-fetch {phase}: {batch_id[:16]}",
                 "goal": (
-                    "Submit this EXACT code via submit_code (do not "
-                    "modify it):\n```python\n"
-                    + script
-                    + "```\nAll inputs have been pre-seeded in arc "
-                    "state.  Do not generate your own code; this "
-                    "script has been audited by the package author."
+                    "Run the pre-verified, package-authored index-fetch "
+                    "script (seeded as this arc's code_file). It reads its "
+                    "phase-specific inputs from arc state, calls the "
+                    "brokered fetch capability, writes the provider JSON to "
+                    "the raw Resource blob, and finalizes it. No agent "
+                    "input is required — this arc dispatches via "
+                    "execute_code."
                 ),
                 "parent_id": parent_id,
                 "integrity_level": "untrusted",
                 "output_type": "json",
                 "agent_type": "EXECUTOR",
+                "code_file_id": index_code_file_id,
                 "step_order": 0,
             },
             {
@@ -966,6 +1146,13 @@ def _create_index_arc_tree(
             "UPDATE resources SET file_path = ? WHERE id = ?",
             (str(briefing_path), briefing_resource_id),
         )
+    # Deterministic born-trusted briefing (PLANNER would freeze; see
+    # _write_briefing_blob).
+    _write_briefing_blob(
+        briefing_resource_id=briefing_resource_id,
+        briefing_path=briefing_path,
+        expected_account_email=expected_account_email,
+    )
 
     # Extract Resource (pending until JUDGE).
     extract_resource_id = _derive_resource(
@@ -995,6 +1182,9 @@ def _create_index_arc_tree(
     )
 
     # Pre-seed arc state.
+    # Grant the EXECUTOR its own package capability (fail-closed dispatch
+    # gate; see _create_read_arc_tree).
+    set_arc_state(executor_arc_id, "_capabilities", [f"pkg.{owner_package}"])
     set_arc_state(executor_arc_id, "raw_resource_path", str(raw_path))
     set_arc_state(executor_arc_id, "raw_resource_id", raw_resource_id)
     set_arc_state(executor_arc_id, "expected_account_email", expected_account_email)
