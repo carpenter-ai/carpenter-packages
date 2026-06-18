@@ -1,10 +1,14 @@
 """
 Package-internal: carpenter-imap-email EXECUTOR scripts conform to the
-``dispatch(Label(...))`` allowlist — and are CRED-FREE / HOST-FREE.
+``dispatch("...")`` allowlist — and are CRED-FREE / HOST-FREE.
 
 Every script string in ``scripts.py`` is the body of an EXECUTOR arc.
-The package's trust contract is that the only verbs an EXECUTOR may
-dispatch are drawn from a small, audit-readable allowlist.  Crucially,
+The scripts use plain ``dispatch("<verb>", {...})`` calls (the policy-
+typed ``Label(...)`` wrapper is no longer needed — these scripts do no
+constrained-control-flow branching, so plain string tool names are fine
+at the dispatch value-boundary).  The package's trust contract is that
+the only verbs an EXECUTOR may dispatch are drawn from a small,
+audit-readable allowlist.  Crucially,
 for this backend that allowlist includes the package's own TRUSTED
 capability verbs (``imap.fetch`` / ``imap.search`` / ``imap.store`` /
 ``imap.append`` / ``smtp.send``) — and EXCLUDES ``web.get`` / ``web.post``,
@@ -36,8 +40,7 @@ _ALLOWED_DISPATCH_VERBS = frozenset({
     "imap.store",
     "imap.append",
     "smtp.send",
-    "files.write",
-    "resource.finalize",
+    "resource.write",
 })
 
 # The package's own trusted capability verbs — at least one script must
@@ -64,7 +67,7 @@ class ScriptsPassAstLint(PackageStory):
     description = (
         "Every EXECUTOR script in scripts.py uses only the documented "
         "dispatch verbs (state.get/set, imap.fetch/search/store, "
-        "smtp.send, files.write, resource.finalize) and is cred-free / "
+        "smtp.send, resource.write) and is cred-free / "
         "host-free (no os.environ, no hardcoded host)."
     )
 
@@ -91,7 +94,7 @@ class ScriptsPassAstLint(PackageStory):
             verbs = _collect_dispatch_verbs(tree)
             self.assert_that(
                 len(verbs) > 0,
-                f"{attr}: no dispatch(Label(...)) call found",
+                f"{attr}: no dispatch(\"...\") call found",
             )
             bad = verbs - _ALLOWED_DISPATCH_VERBS
             self.assert_that(
@@ -140,22 +143,38 @@ class ScriptsPassAstLint(PackageStory):
 
 
 def _collect_dispatch_verbs(tree: ast.AST) -> set[str]:
-    """Return the set of string literals passed as the first arg of
-    ``Label(...)`` when that Label is the first arg of a ``dispatch(...)``
-    call."""
+    """Return the set of verb names passed as the first arg of a
+    ``dispatch(...)`` call.
+
+    Accepts BOTH forms at the dispatch value-boundary:
+
+      * plain string literal — ``dispatch("state.get", {...})`` (the
+        current form; ``Label(...)`` is no longer needed because these
+        scripts do no constrained-control-flow branching), and
+      * legacy ``dispatch(Label("state.get"), {...})`` — still accepted
+        so the walker keeps working if a script reintroduces a Label.
+    """
     verbs: set[str] = set()
     for node in ast.walk(tree):
-        if (
+        if not (
             isinstance(node, ast.Call)
             and isinstance(node.func, ast.Name)
             and node.func.id == "dispatch"
             and node.args
-            and isinstance(node.args[0], ast.Call)
-            and isinstance(node.args[0].func, ast.Name)
-            and node.args[0].func.id == "Label"
-            and node.args[0].args
-            and isinstance(node.args[0].args[0], ast.Constant)
-            and isinstance(node.args[0].args[0].value, str)
         ):
-            verbs.add(node.args[0].args[0].value)
+            continue
+        first = node.args[0]
+        # Plain string literal: dispatch("verb", {...})
+        if isinstance(first, ast.Constant) and isinstance(first.value, str):
+            verbs.add(first.value)
+        # Legacy Label wrapper: dispatch(Label("verb"), {...})
+        elif (
+            isinstance(first, ast.Call)
+            and isinstance(first.func, ast.Name)
+            and first.func.id == "Label"
+            and first.args
+            and isinstance(first.args[0], ast.Constant)
+            and isinstance(first.args[0].value, str)
+        ):
+            verbs.add(first.args[0].value)
     return verbs

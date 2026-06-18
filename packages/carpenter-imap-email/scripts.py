@@ -21,14 +21,15 @@ Trust contract:
 
 * The script runs in the platform's executor sandbox (D24 I8:
   untrusted EXECUTOR can never read trusted Resources or KB).
-* It uses only ``dispatch(Label("..."))`` calls into:
+* It uses only plain ``dispatch("...", {...})`` calls into:
   - ``state.get`` — read pre-seeded arc state (uid / query / payload),
   - ``imap.fetch`` / ``imap.search`` / ``imap.store`` / ``smtp.send`` —
     the package's own TRUSTED capability verbs (permitted ONLY because
     the arc is stamped ``pkg.carpenter-imap-email`` by the owner-stamped
     template),
-  - ``files.write`` — write the raw handler result to a Resource blob,
-  - ``resource.finalize`` — close out the Resource.
+  - ``resource.write`` — persist the raw handler result to a Resource
+    blob (the trusted verb serializes + writes + finalizes; the executor
+    can't write the blob itself).
 * The package author audits these strings once at install time.
 """
 
@@ -40,28 +41,23 @@ from __future__ import annotations
 # Pre-seeded arc state:
 #   * provider_message_id : str  (the IMAP UID to fetch)
 #   * mailbox             : str  (mailbox to select, e.g. "INBOX")
-#   * raw_resource_path   : str  (where to write the JSON blob)
-#   * raw_resource_id     : int  (the Resource row to finalize)
+#   * raw_resource_id     : int  (the Resource row to write + finalize)
 #
 # No credentials, no host.  The trusted imap.fetch handler logs in to
 # the operator-confirmed host with the operator-confirmed credentials
 # and returns the raw RFC-822 text.
 IMAP_FETCH_SCRIPT = '''\
-from carpenter_tools.declarations import Label
-import json
+def read_state(key):
+    return dispatch("state.get", {"key": key})["value"]
 
-def readread_state(key):
-    return dispatch(Label("state.get"), {"key": Label(key)})[Label("value")]
-
-uid               = read_state("provider_message_id")
-mailbox           = read_state("mailbox")
-raw_resource_path = read_state("raw_resource_path")
-raw_resource_id   = read_state("raw_resource_id")
+uid = read_state("provider_message_id")
+mailbox = read_state("mailbox")
+raw_resource_id = read_state("raw_resource_id")
 
 # Reach the mailbox ONLY via the trusted capability verb.  Host + creds
 # come from the operator-confirmed grant, supplied platform-side by the
 # handler — never from this script.
-result = dispatch(Label("imap.fetch"), {
+result = dispatch("imap.fetch", {
     "uid": uid,
     "mailbox": mailbox,
     "peek": True,
@@ -69,13 +65,10 @@ result = dispatch(Label("imap.fetch"), {
 if not result.get("ok"):
     raise RuntimeError("imap.fetch failed: " + str(result.get("error")))
 
-# Persist the raw handler result to the Resource blob and finalize so
-# the REVIEWER + JUDGE can graduate a typed extract.
-dispatch(Label("files.write"), {
-    "path": raw_resource_path,
-    "content": json.dumps(result),
-})
-dispatch(Label("resource.finalize"), {"resource_id": raw_resource_id})
+# Persist the raw handler result to the Resource blob.  The trusted
+# resource.write verb serializes + writes + finalizes so the REVIEWER +
+# JUDGE can graduate a typed extract.
+dispatch("resource.write", {"resource_id": raw_resource_id, "content": result})
 '''
 
 
@@ -85,23 +78,18 @@ dispatch(Label("resource.finalize"), {"resource_id": raw_resource_id})
 #   * search_query : str  (free text; mapped to a SUBJECT/TEXT criteria)
 #   * mailbox      : str
 #   * max_results  : int
-#   * id_list_path : str  (output JSON file path)
 #   * raw_resource_id : int
 #
-# Writes the trusted imap.search result (matching UIDs) to a JSON file
-# for the chat tool to parse and fan out per-message read arcs.
+# Writes the trusted imap.search result (matching UIDs) to the Resource
+# blob for the chat tool to parse and fan out per-message read arcs.
 IMAP_SEARCH_SCRIPT = '''\
-from carpenter_tools.declarations import Label
-import json
+def read_state(key):
+    return dispatch("state.get", {"key": key})["value"]
 
-def readread_state(key):
-    return dispatch(Label("state.get"), {"key": Label(key)})[Label("value")]
-
-query             = read_state("search_query")
-mailbox           = read_state("mailbox")
-max_results       = int(read_state("max_results"))
-id_list_path      = read_state("id_list_path")
-raw_resource_id   = read_state("raw_resource_id")
+query = read_state("search_query")
+mailbox = read_state("mailbox")
+max_results = int(read_state("max_results"))
+raw_resource_id = read_state("raw_resource_id")
 
 # Map the free-text query to an allowlisted IMAP search criterion.  The
 # trusted handler validates the key + quotes the term; an empty query
@@ -111,7 +99,7 @@ if query:
 else:
     criteria = [["ALL"]]
 
-result = dispatch(Label("imap.search"), {
+result = dispatch("imap.search", {
     "mailbox": mailbox,
     "criteria": criteria,
     "max_results": max_results,
@@ -119,11 +107,7 @@ result = dispatch(Label("imap.search"), {
 if not result.get("ok"):
     raise RuntimeError("imap.search failed: " + str(result.get("error")))
 
-dispatch(Label("files.write"), {
-    "path": id_list_path,
-    "content": json.dumps(result),
-})
-dispatch(Label("resource.finalize"), {"resource_id": raw_resource_id})
+dispatch("resource.write", {"resource_id": raw_resource_id, "content": result})
 '''
 
 
@@ -132,9 +116,7 @@ dispatch(Label("resource.finalize"), {"resource_id": raw_resource_id})
 # Pre-seeded arc state:
 #   * raw_message_b64        : str  (RFC-822 message text; see note)
 #   * to_addresses_json      : str  (JSON array of recipients)
-#   * expected_account_email : str  (mailbox we expect to send from)
 #   * sent_mailbox           : str  (folder to file the Sent copy into)
-#   * raw_resource_path      : str
 #   * raw_resource_id        : int
 #
 # Unlike the Gmail send script, there is NO in-script userinfo/account
@@ -153,23 +135,21 @@ dispatch(Label("resource.finalize"), {"resource_id": raw_resource_id})
 # a send is already irrevocably out the door, so an append failure is
 # recorded in the receipt rather than failing the whole arc.
 SMTP_SEND_SCRIPT = '''\
-from carpenter_tools.declarations import Label
 import json
 
-def readread_state(key):
-    return dispatch(Label("state.get"), {"key": Label(key)})[Label("value")]
+def read_state(key):
+    return dispatch("state.get", {"key": key})["value"]
 
-raw_message       = read_state("raw_message_b64")
-to_json           = read_state("to_addresses_json")
-sent_mailbox      = read_state("sent_mailbox")
-raw_resource_path = read_state("raw_resource_path")
-raw_resource_id   = read_state("raw_resource_id")
+raw_message = read_state("raw_message_b64")
+to_json = read_state("to_addresses_json")
+sent_mailbox = read_state("sent_mailbox")
+raw_resource_id = read_state("raw_resource_id")
 
 to_addresses = json.loads(to_json)
 if not isinstance(to_addresses, list):
     raise RuntimeError("to_addresses_json must be a JSON array")
 
-result = dispatch(Label("smtp.send"), {
+result = dispatch("smtp.send", {
     "raw_message": raw_message,
     "to": to_addresses,
 })
@@ -178,7 +158,7 @@ if not result.get("ok"):
 
 # File a server-side copy into the Sent folder (mailbox.org does not do
 # this for raw SMTP sends).  Best-effort: the mail is already sent.
-append_result = dispatch(Label("imap.append"), {
+append_result = dispatch("imap.append", {
     "raw_message": raw_message,
     "mailbox": sent_mailbox,
     "flags": ["\\\\Seen"],
@@ -192,11 +172,7 @@ receipt = {
     "sent_copy_filed": bool(append_result.get("ok")),
     "sent_mailbox": sent_mailbox,
 }
-dispatch(Label("files.write"), {
-    "path": raw_resource_path,
-    "content": json.dumps(receipt),
-})
-dispatch(Label("resource.finalize"), {"resource_id": raw_resource_id})
+dispatch("resource.write", {"resource_id": raw_resource_id, "content": receipt})
 '''
 
 
@@ -217,24 +193,18 @@ dispatch(Label("resource.finalize"), {"resource_id": raw_resource_id})
 # Pre-seeded arc state:
 #   * raw_message_b64        : str  (RFC-822 message text)
 #   * mailbox                : str  (Drafts mailbox name)
-#   * expected_account_email : str
-#   * raw_resource_path      : str
 #   * raw_resource_id        : int
 IMAP_DRAFT_SCRIPT = '''\
-from carpenter_tools.declarations import Label
-import json
+def read_state(key):
+    return dispatch("state.get", {"key": key})["value"]
 
-def readread_state(key):
-    return dispatch(Label("state.get"), {"key": Label(key)})[Label("value")]
-
-raw_message       = read_state("raw_message_b64")
-mailbox           = read_state("mailbox")
-raw_resource_path = read_state("raw_resource_path")
-raw_resource_id   = read_state("raw_resource_id")
+raw_message = read_state("raw_message_b64")
+mailbox = read_state("mailbox")
+raw_resource_id = read_state("raw_resource_id")
 
 # Append the message to the Drafts mailbox via the trusted imap.store
 # verb (append mode).  The handler supplies host + creds.
-result = dispatch(Label("imap.store"), {
+result = dispatch("imap.store", {
     "uid": "1",
     "mailbox": mailbox,
     "flags": ["\\\\Draft"],
@@ -250,11 +220,7 @@ receipt = {
     "draft_id": "imap-draft-" + str(result.get("uid", "0")),
     "status_code": 200 if result.get("ok") else 500,
 }
-dispatch(Label("files.write"), {
-    "path": raw_resource_path,
-    "content": json.dumps(receipt),
-})
-dispatch(Label("resource.finalize"), {"resource_id": raw_resource_id})
+dispatch("resource.write", {"resource_id": raw_resource_id, "content": receipt})
 '''
 
 
@@ -263,8 +229,6 @@ dispatch(Label("resource.finalize"), {"resource_id": raw_resource_id})
 # Pre-seeded arc state:
 #   * provider_message_id     : str  (IMAP UID)
 #   * mailbox                 : str
-#   * expected_account_email  : str
-#   * raw_resource_path       : str
 #   * raw_resource_id         : int
 #
 # Archive in this backend = mark the message with a provider archive
@@ -272,18 +236,14 @@ dispatch(Label("resource.finalize"), {"resource_id": raw_resource_id})
 # trusted imap.store handler returns prior_flags so we can compute
 # was_already_archived.
 IMAP_ARCHIVE_SCRIPT = '''\
-from carpenter_tools.declarations import Label
-import json
+def read_state(key):
+    return dispatch("state.get", {"key": key})["value"]
 
-def readread_state(key):
-    return dispatch(Label("state.get"), {"key": Label(key)})[Label("value")]
+uid = read_state("provider_message_id")
+mailbox = read_state("mailbox")
+raw_resource_id = read_state("raw_resource_id")
 
-uid               = read_state("provider_message_id")
-mailbox           = read_state("mailbox")
-raw_resource_path = read_state("raw_resource_path")
-raw_resource_id   = read_state("raw_resource_id")
-
-result = dispatch(Label("imap.store"), {
+result = dispatch("imap.store", {
     "uid": uid,
     "mailbox": mailbox,
     "flags": ["\\\\Seen", "Archived"],
@@ -301,11 +261,7 @@ receipt = {
     "was_already_archived": was_already_archived,
     "status_code": 200,
 }
-dispatch(Label("files.write"), {
-    "path": raw_resource_path,
-    "content": json.dumps(receipt),
-})
-dispatch(Label("resource.finalize"), {"resource_id": raw_resource_id})
+dispatch("resource.write", {"resource_id": raw_resource_id, "content": receipt})
 '''
 
 
@@ -313,18 +269,14 @@ dispatch(Label("resource.finalize"), {"resource_id": raw_resource_id})
 #
 # Pre-seeded arc state: identical to the archive script.
 IMAP_MARK_READ_SCRIPT = '''\
-from carpenter_tools.declarations import Label
-import json
+def read_state(key):
+    return dispatch("state.get", {"key": key})["value"]
 
-def readread_state(key):
-    return dispatch(Label("state.get"), {"key": Label(key)})[Label("value")]
+uid = read_state("provider_message_id")
+mailbox = read_state("mailbox")
+raw_resource_id = read_state("raw_resource_id")
 
-uid               = read_state("provider_message_id")
-mailbox           = read_state("mailbox")
-raw_resource_path = read_state("raw_resource_path")
-raw_resource_id   = read_state("raw_resource_id")
-
-result = dispatch(Label("imap.store"), {
+result = dispatch("imap.store", {
     "uid": uid,
     "mailbox": mailbox,
     "flags": ["\\\\Seen"],
@@ -342,9 +294,5 @@ receipt = {
     "was_already_read": was_already_read,
     "status_code": 200,
 }
-dispatch(Label("files.write"), {
-    "path": raw_resource_path,
-    "content": json.dumps(receipt),
-})
-dispatch(Label("resource.finalize"), {"resource_id": raw_resource_id})
+dispatch("resource.write", {"resource_id": raw_resource_id, "content": receipt})
 '''
