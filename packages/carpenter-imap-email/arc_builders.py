@@ -59,6 +59,14 @@ def _save_fetch_code_file(fetch_script: str, *, name: str):
 
     The script reads all of its inputs from arc state at run time, so it
     has no dependency on arc ids and can be saved before the batch.
+
+    The script is stamped ``review_status="approved"``: it is PRE-VERIFIED,
+    operator-trusted package code (audited by the package author; the
+    operator granted the package's capabilities at install). That makes its
+    ``execute_code`` session ``reviewed`` so it may invoke the action/
+    dispatch verbs it needs (the package's ``imap.*`` capability verb and
+    ``resource.write``). The per-package capability gate independently
+    restricts those verbs to this package's own arcs.
     """
     from carpenter.core import code_manager as _code_manager
 
@@ -66,6 +74,7 @@ def _save_fetch_code_file(fetch_script: str, *, name: str):
         fetch_script,
         source="template",
         name=name,
+        review_status="approved",
     )
     return saved["code_file_id"]
 
