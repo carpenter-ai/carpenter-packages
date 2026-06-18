@@ -1,5 +1,5 @@
 name: carpenter-gmail
-version: "0.7.4"
+version: "0.7.5"
 description: |
   Email assistant package (Gmail API backend).  Phase 1 shipped read
   templates through the D24 untrusted-data pipeline and send mail
