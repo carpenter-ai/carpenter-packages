@@ -55,35 +55,36 @@ def _reviewer_goal(extract_kind: str) -> str:
     untrusted email and reason about the structured classification
     fields (category, sanitised subject, flags, attachment metadata).
     But the PERSISTENCE of its output must be reliable-by-default, not
-    fragile code-generation.  Two things historically made it flail:
+    fragile code-generation.  History of what flailed:
 
-    * The old goal told it to ``derive_resource`` — which is NOT a
-      dispatch verb the REVIEWER can call (it is a pure-Python core
-      function, absent from the agent's allowed_tools and unimportable
-      in the sandbox).  The extract Resource is ALREADY pre-created
-      (pending, kind-tagged) by this builder, so there is nothing to
-      derive — only a blob to write.
-    * It told it to ``read_resource`` — also not in the REVIEWER's
-      allowed_tools.  Trusted REVIEWER arcs read blobs by PATH via
-      ``files.read``.
+    * The earliest goal told it to ``derive_resource`` / ``read_resource``
+      — neither is a tool the REVIEWER has.  The extract Resource is
+      ALREADY pre-created (pending, kind-tagged) by this builder, so
+      there is nothing to derive — only field VALUES to supply.
+    * The next iteration told it to persist via a ``submit_code``
+      submission containing ``dispatch("resource.write", ...)``.  The
+      infrastructure CAN run that for a trusted REVIEWER, but in practice
+      the LLM flailed generating the dispatch code and gave up ("no
+      resource.write API… dispatch() not available… deadlocked").
+      Code-generation for the persistence step is the fragile part.
 
-    So we hand the REVIEWER the SAME mechanically-reliable shape the
-    EXECUTOR uses: read inputs by path, then persist with ONE
-    ``dispatch("resource.write", ...)`` call inside a single
-    ``submit_code`` submission.  The LLM produces the field VALUES; the
-    call shape is fixed and copy-pasteable.  ``resource.write`` writes
-    the blob + finalises without touching ``produced_by_template`` /
-    ``template_verdict`` — the Resource stays template-owned and
-    ``pending`` so the deterministic JUDGE remains the sole authority
-    that flips it to approved (the REVIEWER never self-approves).
+    So the REVIEWER now persists via a dedicated structured tool_use
+    tool: ``submit_extract``.  The LLM supplies the extract field VALUES
+    as a single ``fields`` JSON argument — no code, no dispatch.  The
+    platform handler writes ``fields`` into THIS arc's own pre-created
+    pending extract Resource (caller==producer enforced) and finalizes
+    it, leaving ``produced_by_template`` / ``template_verdict=pending``
+    intact so the deterministic JUDGE remains the sole authority that
+    approves it (the REVIEWER never self-approves).  Data crossing as a
+    tool argument needs no code verification — only the JUDGE gates it.
     """
     return (
         "You are the REVIEWER. The typed extract Resource has ALREADY "
         "been created for you (pending verdict, kind="
-        f"{extract_kind}); your ONLY job is to fill in its field VALUES "
-        "and persist them with ONE call. Do NOT call derive_resource "
-        "(it is not a tool you have) and do NOT try to create a new "
-        "Resource.\n\n"
+        f"{extract_kind}); your ONLY job is to compute its field VALUES "
+        "and persist them with ONE submit_extract tool call. You do NOT "
+        "write code and you do NOT call dispatch. Do NOT try to create or "
+        "approve a Resource.\n\n"
         "STEP 1 — read your inputs by path using files.read:\n"
         "  briefing_path = dispatch('state.get', "
         "{'key': 'briefing_resource_path'})['value']\n"
@@ -98,23 +99,17 @@ def _reviewer_goal(extract_kind: str) -> str:
         "classification + sanitised subject + flags + attachment "
         "metadata). schema_version MUST equal the briefing's "
         "extract_schema_version (currently '1.0').\n\n"
-        "STEP 3 — persist with EXACTLY this one submit_code submission "
-        "(substitute your computed field values into the dict; do not "
-        "add any other dispatch calls):\n"
-        "```python\n"
-        "extract_resource_id = dispatch('state.get', "
-        "{'key': 'extract_resource_id'})['value']\n"
-        "extract = {\n"
-        "    # ... the extract fields you computed in step 2 ...\n"
-        "    'schema_version': '1.0',\n"
-        "}\n"
-        "dispatch('resource.write', "
-        "{'resource_id': extract_resource_id, 'content': extract, "
-        "'deprecate_inputs': True})\n"
-        "```\n"
-        "The 'content' dict is written verbatim as the extract blob "
-        "(json). Then exit — the deterministic JUDGE validates your "
-        "output and graduates it; you do NOT approve it yourself."
+        "STEP 3 — persist with EXACTLY ONE submit_extract call. Pass the "
+        "field values as the 'fields' object (substitute your computed "
+        "values):\n"
+        "  submit_extract(fields={\n"
+        "      # ... the extract fields you computed in step 2 ...\n"
+        "      'schema_version': '1.0',\n"
+        "  })\n"
+        "The 'fields' object is written verbatim as the extract blob "
+        "(json) into your own pending Resource. Then exit — the "
+        "deterministic JUDGE validates your output and graduates it; you "
+        "do NOT approve it yourself."
     )
 
 
