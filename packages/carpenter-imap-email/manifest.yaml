@@ -1,5 +1,5 @@
 name: carpenter-imap-email
-version: "0.2.6"
+version: "0.2.7"
 description: |
   Email assistant package (IMAP/SMTP backend).  The first real consumer
   of Carpenter's package-capability framework: instead of reaching the
