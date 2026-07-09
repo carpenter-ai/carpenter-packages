@@ -71,24 +71,39 @@ _DRAFTS_MAILBOX = "Drafts"
 # ---------------------------------------------------------------------------
 
 
+_PACKAGE_NAME = "carpenter-imap-email"
+
+
 def _resolve_expected_account() -> str:
     """Return the mailbox address Carpenter expects to be acting on.
 
     For the IMAP backend the configured account is the IMAP username the
     operator supplied at install (``EMAIL_IMAP_USERNAME``), falling
-    back to the platform operator email.  Returns empty string if
-    neither is set; callers MUST treat empty as a fail-closed condition
-    (the T1 envelope check is unenforceable without an expected account).
+    back to the platform-wide ``operator_email`` in the main config.
+    Returns empty string if neither is set; callers MUST treat empty as
+    a fail-closed condition (the T1 envelope check is unenforceable
+    without an expected account).
 
-    Resolved PLATFORM-SIDE from the loaded config — the chat tool runs
-    in trusted context, so reading the configured account here is safe.
-    The untrusted EXECUTOR never sees it; only the typed briefing /
-    extract carries ``expected_account_email`` through the JUDGE gate.
+    The IMAP username lives in the per-package ``.env`` at
+    ``{base_dir}/config/packages/carpenter-imap-email/.env``, so it is
+    read via :func:`resolve_package_secret` — the same resolver the
+    trigger poller and reflection SMTP dispatch use.  The previous
+    implementation only consulted ``config.CONFIG`` and so every gated
+    chat tool (``pkg_imap_send_email``, ``pkg_imap_reply_email``,
+    ``pkg_imap_fetch_email``, etc.) failed closed with the
+    "expected_account is not configured" error even when the operator's
+    credentials were present on disk.
+
+    Resolved PLATFORM-SIDE — the chat tool runs in trusted context, so
+    reading the configured account here is safe.  The untrusted
+    EXECUTOR never sees it; only the typed briefing / extract carries
+    ``expected_account_email`` through the JUDGE gate.
     """
     from carpenter import config
+    from carpenter.packages.capabilities import resolve_package_secret
 
     return (
-        config.CONFIG.get(f"{_ENV_KEY_PREFIX}_IMAP_USERNAME")
+        resolve_package_secret(_PACKAGE_NAME, f"{_ENV_KEY_PREFIX}_IMAP_USERNAME")
         or config.CONFIG.get("operator_email")
         or ""
     ).strip().lower()
