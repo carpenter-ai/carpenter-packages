@@ -45,7 +45,8 @@ from __future__ import annotations
 #
 # No credentials, no host.  The trusted imap.fetch handler logs in to
 # the operator-confirmed host with the operator-confirmed credentials
-# and returns the raw RFC-822 text.
+# and returns a parsed view: selected headers, a capped text body and
+# attachment metadata.
 IMAP_FETCH_SCRIPT = '''\
 def read_state(key):
     return dispatch("state.get", {"key": key})["value"]

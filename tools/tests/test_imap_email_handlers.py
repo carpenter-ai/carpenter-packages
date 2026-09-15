@@ -52,6 +52,7 @@ from __future__ import annotations
 
 import importlib.util
 import sys
+from email.message import EmailMessage
 from pathlib import Path
 
 import pytest
@@ -127,6 +128,7 @@ class FakeIMAP:
     with so the test can prove they came from ctx, not params."""
 
     instances: list["FakeIMAP"] = []
+    fetch_body = b"hello"
 
     def __init__(self, host=None, port=None, timeout=None):
         self.host = host
@@ -155,7 +157,7 @@ class FakeIMAP:
             uid, item = args[0], args[1]
             if "FLAGS" in item:
                 return ("OK", [(b"1 (FLAGS (\\Seen))", b"")])
-            return ("OK", [(b"1 (BODY[] {5}", b"hello"), b")"])
+            return ("OK", [(b"1 (BODY[] {5}", FakeIMAP.fetch_body), b")"])
         if command == "SEARCH":
             return ("OK", [b"1 2 3"])
         if command == "STORE":
@@ -197,6 +199,7 @@ class FakeSMTP:
 def _patch_net(monkeypatch):
     FakeIMAP.instances.clear()
     FakeSMTP.instances.clear()
+    FakeIMAP.fetch_body = b"hello"
     monkeypatch.setattr(handlers.imaplib, "IMAP4_SSL", FakeIMAP)
     monkeypatch.setattr(handlers.smtplib, "SMTP_SSL", FakeSMTP)
     yield
@@ -221,6 +224,83 @@ def test_imap_fetch_uses_ctx_host_and_creds_not_params():
     assert inst.port == 993
     # Login creds came from ctx.secret, not params.
     assert inst.logged_in_as == ("me@example.com", "app-pw")
+
+
+def _newsletter(
+    html: str, *, plain: str = "View in browser", attachment: bytes | None = None,
+) -> bytes:
+    msg = EmailMessage()
+    msg["From"] = "Newsletter <news@example.com>"
+    msg["To"] = "me@example.com"
+    msg["Subject"] = "Weekly digest"
+    msg.set_content(plain)
+    msg.add_alternative(html, subtype="html")
+    if attachment is not None:
+        msg.add_attachment(
+            attachment, maintype="application", subtype="pdf",
+            filename="report.pdf",
+        )
+    return msg.as_bytes()
+
+
+def test_imap_fetch_returns_parsed_view_not_raw_source():
+    html = (
+        "<html><head><style>.x{color:red}</style></head><body>"
+        "<p>Hello&nbsp;reader</p><script>track()</script>"
+        "<div>Second   paragraph</div></body></html>"
+    )
+    FakeIMAP.fetch_body = _newsletter(html, attachment=b"%PDF-1.4 data")
+
+    out = handlers.handle_imap_fetch({"uid": "42"}, _imap_ctx())
+
+    assert out["ok"] is True
+    assert "rfc822" not in out
+    assert out["headers"]["subject"] == "Weekly digest"
+    assert out["headers"]["from"] == "Newsletter <news@example.com>"
+    # The stub text/plain part loses to the HTML part's visible text.
+    assert out["body_source"] == "text/html"
+    assert out["body_text"] == "Hello reader\nSecond paragraph"
+    assert "track()" not in out["body_text"]
+    assert out["attachments"] == [{
+        "filename": "report.pdf",
+        "content_type": "application/pdf",
+        "size_bytes": len(b"%PDF-1.4 data"),
+    }]
+    assert out["attachment_count"] == 1
+
+
+def test_imap_fetch_prefers_substantial_plain_text():
+    plain = "A real plain-text edition. " * 20
+    FakeIMAP.fetch_body = _newsletter("<p>HTML edition</p>", plain=plain)
+
+    out = handlers.handle_imap_fetch({"uid": "42"}, _imap_ctx())
+
+    assert out["body_source"] == "text/plain"
+    assert out["body_text"] == plain.strip()
+    assert out["body_truncated"] is False
+
+
+def test_imap_fetch_caps_body_text(monkeypatch):
+    monkeypatch.setattr(handlers, "_MAX_BODY_CHARS", 100)
+    msg = EmailMessage()
+    msg["Subject"] = "Long"
+    msg.set_content("word " * 500)
+    FakeIMAP.fetch_body = msg.as_bytes()
+
+    out = handlers.handle_imap_fetch({"uid": "42"}, _imap_ctx())
+
+    assert out["body_source"] == "text/plain"
+    assert len(out["body_text"]) == 100
+    assert out["body_truncated"] is True
+
+
+def test_imap_fetch_tolerates_non_mime_bytes():
+    FakeIMAP.fetch_body = b"\xff\xfe not an email at all"
+
+    out = handlers.handle_imap_fetch({"uid": "42"}, _imap_ctx())
+
+    assert out["ok"] is True
+    assert out["attachments"] == []
 
 
 def test_imap_fetch_rejects_bad_uid():

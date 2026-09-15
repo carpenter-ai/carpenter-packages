@@ -45,7 +45,7 @@ steps:
       sanitised subject form.
     order: 2
     agent_type: REVIEWER
-    model_policy: careful-coding
+    model_policy: fast-chat
     arc_role: verifier
   - name: judge-triage
     description: |
