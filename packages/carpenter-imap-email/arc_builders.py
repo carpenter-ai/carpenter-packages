@@ -682,7 +682,12 @@ def _create_triage_arc_tree(
                 "agent_type": "REVIEWER",
                 "integrity_level": "trusted",
                 "reviewer_profile": "security-reviewer",
-                "model_policy": "careful-coding",
+                # Triage runs unattended on every inbound message, so it
+                # uses the cheap preset.  careful-coding selected the
+                # frontier model for each newsletter.  The extract is a
+                # closed-enum classification the deterministic JUDGE
+                # re-validates either way.
+                "model_policy": "fast-chat",
                 "step_order": 1,
             },
             {

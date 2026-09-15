@@ -32,6 +32,9 @@ Bounds enforced:
 * Connection + socket timeouts (``_TIMEOUT_S``).
 * Maximum fetched message size (``_MAX_FETCH_BYTES``); larger messages
   are truncated with ``truncated: true`` in the result.
+* ``imap.fetch`` returns a parsed view (selected headers, a text body
+  capped at ``_MAX_BODY_CHARS``, attachment metadata), never the raw
+  RFC-822 source, which the REVIEWER model would otherwise read in full.
 * Maximum search result count (``_MAX_SEARCH_RESULTS``).
 * UID / mailbox / flag shape validation (reject anything that could be
   an IMAP-command-injection vector).
@@ -44,11 +47,14 @@ credential or host into an error string.
 
 from __future__ import annotations
 
+import email
+import email.policy
 import imaplib
 import re
 import smtplib
 import time
 from email.message import EmailMessage
+from html.parser import HTMLParser
 
 # ── Bounds ──────────────────────────────────────────────────────────
 
@@ -57,6 +63,18 @@ _TIMEOUT_S = 30.0
 # REVIEWER only needs headers + a text summary; we refuse to stream a
 # multi-hundred-MB attachment payload into a Resource.
 _MAX_FETCH_BYTES = 5 * 1024 * 1024
+# Cap the decoded body text handed to the REVIEWER.  Every REVIEWER turn
+# resends it, so this bounds model spend per message.  Returning the raw
+# MIME source instead cost 100k-200k tokens a turn for an HTML newsletter.
+_MAX_BODY_CHARS = 16_000
+_MAX_ATTACHMENTS = 32
+# A text/plain part shorter than this is treated as a stub when an HTML
+# part is also present, and the HTML's visible text is used if longer.
+_MIN_PLAIN_BODY_CHARS = 200
+_FETCH_HEADERS = (
+    "From", "To", "Cc", "Reply-To", "Subject", "Date", "Message-ID",
+    "List-Id", "List-Unsubscribe",
+)
 _MAX_SEARCH_RESULTS = 100
 _MAX_RAW_MESSAGE_BYTES = 10 * 1024 * 1024
 
@@ -171,20 +189,145 @@ def _close_quietly(conn: imaplib.IMAP4_SSL | None) -> None:
         pass
 
 
+# ── Message parsing ─────────────────────────────────────────────────
+
+
+class _HTMLText(HTMLParser):
+    """Collect the visible text of an HTML document."""
+
+    _SKIP = {"script", "style", "head", "title"}
+    _BREAK = {"br", "p", "div", "tr", "li", "h1", "h2", "h3", "h4", "table"}
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.parts: list[str] = []
+        self._skipping = 0
+
+    def handle_starttag(self, tag, attrs):
+        if tag in self._SKIP:
+            self._skipping += 1
+        elif tag in self._BREAK:
+            self.parts.append("\n")
+
+    def handle_endtag(self, tag):
+        if tag in self._SKIP and self._skipping:
+            self._skipping -= 1
+
+    def handle_data(self, data):
+        if not self._skipping:
+            self.parts.append(data)
+
+
+def _html_to_text(html: str) -> str:
+    parser = _HTMLText()
+    try:
+        parser.feed(html)
+        parser.close()
+    except Exception:  # noqa: BLE001 — malformed HTML: keep what parsed
+        pass
+    return "".join(parser.parts)
+
+
+def _squeeze_whitespace(text: str) -> str:
+    lines = (" ".join(line.split()) for line in text.splitlines())
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).strip()
+
+
+def _part_text(part) -> str:
+    try:
+        return part.get_content()
+    except Exception:  # noqa: BLE001 — unknown charset / bad encoding
+        payload = part.get_payload(decode=True) or b""
+        return payload.decode("utf-8", errors="replace")
+
+
+def _parse_message(raw: bytes) -> dict:
+    """Reduce raw RFC-822 bytes to what a REVIEWER needs to classify it.
+
+    Returns ``headers`` (selected, as decoded strings), ``body_text``
+    (plain-text part preferred, else HTML reduced to its visible text,
+    capped at ``_MAX_BODY_CHARS``), ``body_truncated``, ``body_source``
+    (the MIME type the text came from, or None) and ``attachments``
+    (filename / content_type / size_bytes, capped at ``_MAX_ATTACHMENTS``).
+    """
+    msg = email.message_from_bytes(raw, policy=email.policy.default)
+
+    headers = {}
+    for name in _FETCH_HEADERS:
+        try:
+            value = msg.get(name)
+        except Exception:  # noqa: BLE001 — malformed header
+            value = None
+        if value is not None:
+            headers[name.lower()] = str(value)[:1000]
+
+    # Prefer the text/plain part, unless it is a stub ("view this email in
+    # your browser") next to a real HTML part, as newsletters often send.
+    body_source = None
+    body_text = ""
+    for subtype in ("plain", "html"):
+        try:
+            part = msg.get_body(preferencelist=(subtype,))
+        except Exception:  # noqa: BLE001
+            part = None
+        if part is None:
+            continue
+        text = _part_text(part)
+        if subtype == "html":
+            text = _html_to_text(text)
+        text = _squeeze_whitespace(text)
+        if len(text) > len(body_text):
+            body_source, body_text = part.get_content_type(), text
+        if len(body_text) >= _MIN_PLAIN_BODY_CHARS:
+            break
+
+    body_truncated = len(body_text) > _MAX_BODY_CHARS
+    if body_truncated:
+        body_text = body_text[:_MAX_BODY_CHARS]
+
+    attachments = []
+    attachment_count = 0
+    try:
+        for part in msg.iter_attachments():
+            attachment_count += 1
+            if len(attachments) >= _MAX_ATTACHMENTS:
+                continue
+            payload = part.get_payload(decode=True) or b""
+            attachments.append({
+                "filename": (part.get_filename() or "")[:255],
+                "content_type": part.get_content_type(),
+                "size_bytes": len(payload),
+            })
+    except Exception:  # noqa: BLE001 — non-multipart or malformed tree
+        pass
+
+    return {
+        "headers": headers,
+        "body_text": body_text,
+        "body_truncated": body_truncated,
+        "body_source": body_source,
+        "attachments": attachments,
+        "attachment_count": attachment_count,
+    }
+
+
 # ── Capability handlers ─────────────────────────────────────────────
 
 
 def handle_imap_fetch(params: dict, ctx) -> dict:
-    """Fetch one message by UID and return its raw RFC-822 bytes (text).
+    """Fetch one message by UID and return a parsed, size-bounded view of it.
 
     Params (executor-controlled): ``uid`` (required), ``mailbox``
     (optional, default INBOX), ``peek`` (optional bool, default True —
     use BODY.PEEK so fetching does not implicitly mark the message
     \\Seen).
 
-    Returns ``{"ok", "uid", "mailbox", "rfc822", "size_bytes",
-    "truncated", "host", "port"}``.  The ``rfc822`` text is what the
-    REVIEWER summarises; the JUDGE bounds the typed extract.
+    Returns ``{"ok", "uid", "mailbox", "headers", "body_text",
+    "body_truncated", "body_source", "attachments", "attachment_count",
+    "size_bytes", "truncated", "host", "port"}`` (see
+    :func:`_parse_message`).  This is what the REVIEWER summarises; the
+    JUDGE bounds the typed extract.  ``size_bytes`` / ``truncated`` refer
+    to the raw message as fetched.
     """
     try:
         uid = _valid_uid(params)
@@ -214,7 +357,7 @@ def handle_imap_fetch(params: dict, ctx) -> dict:
                 "ok": True,
                 "uid": uid,
                 "mailbox": mailbox,
-                "rfc822": raw.decode("utf-8", errors="replace"),
+                **_parse_message(raw),
                 "size_bytes": size,
                 "truncated": truncated,
                 "host": ctx.host,
